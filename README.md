@@ -62,6 +62,12 @@ after Rauthy accepts the create, and clears it before creating again. A
 its external name. Annotations, including Crossplane's
 `crossplane.io/external-create-*` marks, grant nothing.
 
+Before it acts as the owner (reports the client as existing, reads its
+secret, updates or deletes it), the provider re-reads the `Client` straight
+from the API server, bypassing its cache, and requires the record there, on
+the same object (same UID). A lagging cache can therefore delay the provider
+but never make it act on a client it no longer owns.
+
 The API server ignores `status` when a `Client` is created or updated through
 the main resource, so a manifest cannot carry ownership. What it does rely on:
 
@@ -86,17 +92,22 @@ the main resource, so a manifest cannot carry ownership. What it does rely on:
 ### When a create goes wrong
 
 - **Rauthy refuses the create** (a 4xx answer) and a client with that id
-  exists: the id belongs to somebody else, and the adoption error above is
-  reported.
+  exists: the id belongs to somebody else. The resource reports the adoption
+  error above, and keeps reporting it on later reconciles.
 - **The create request fails ambiguously** (a timeout, a transport error or a
   5xx answer) and a client with that id exists afterwards: the create may have
   gone through, but that cannot be proven. The resource reports `create outcome
   unknown: the request failed but a client with id "<id>" now exists; verify
-  and delete it in Rauthy to retry` and does not claim the client. The same
-  error appears when the provider stopped between the create and recording
-  ownership. Check the client in Rauthy and delete it if it is not in use;
-  the resource then creates it afresh.
-- **Recording ownership fails** after Rauthy accepted the create: the provider
+  and delete it in Rauthy to retry` and does not claim the client. It keeps
+  reporting this on later reconciles, as long as its own failed or interrupted
+  create attempt is on record; the same error appears when the provider
+  stopped between the create and recording ownership. Check the client in
+  Rauthy and delete it if it is not in use; the resource then creates it
+  afresh. The create attempts on record (annotations) only choose this
+  wording; they never grant ownership.
+- **Recording ownership fails** after Rauthy accepted the create, including
+  when the installed `Client` CRD is older and silently drops
+  `status.ownership` (the error then says so: upgrade the CRDs): the provider
   deletes the new client again and retries on the next reconcile. If that
   deletion fails too, the error names the client to delete in Rauthy by hand.
 
