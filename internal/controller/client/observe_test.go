@@ -70,26 +70,21 @@ func TestObserve(t *testing.T) {
 				calls: []string{"GET /clients/app"},
 			},
 		},
-		"ForeignClientAfterFailedRecreate": {
-			reason: "A failed re-create after an earlier success does not keep ownership.",
-			cr: newClient(owned, func(cr *v1alpha1.Client) {
-				meta.SetExternalCreatePending(cr, time.Now())
-				meta.SetExternalCreateFailed(cr, time.Now())
-			}),
+		"ForgedAnnotationsAreNotOwnership": {
+			reason: "Annotations a manifest can carry never grant ownership: no exists, no secret.",
+			cr:     newClient(forged),
 			server: existing(true),
 			want: want{
 				errIs: client.ErrAdoption,
 				calls: []string{"GET /clients/app"},
 			},
 		},
-		"SucceededWithoutCreatedID": {
-			reason: "The runtime's create-succeeded mark alone, without the id Create records, is not ownership.",
-			cr: newClient(owned, func(cr *v1alpha1.Client) {
-				meta.RemoveAnnotations(cr, client.AnnotationKeyCreatedClientID)
-			}),
+		"InterruptedCreate": {
+			reason: "A create interrupted before ownership was recorded is refused as an unknown outcome.",
+			cr:     newClient(func(cr *v1alpha1.Client) { meta.SetExternalCreatePending(cr, time.Now()) }),
 			server: existing(true),
 			want: want{
-				errIs: client.ErrAdoption,
+				err:   errors.New("create outcome unknown"),
 				calls: []string{"GET /clients/app"},
 			},
 		},
@@ -189,27 +184,32 @@ func TestObserve(t *testing.T) {
 			server: existing(true),
 			want:   want{err: errors.New("the client id is immutable")},
 		},
+		"PolicyWithoutUpdate": {
+			reason: "Policies without Update cannot bring the client to the spec and are refused.",
+			cr: newClient(owned, policies(
+				xpv2.ManagementActionObserve, xpv2.ManagementActionCreate, xpv2.ManagementActionDelete)),
+			server: existing(true),
+			want:   want{err: errors.New("lack Update")},
+		},
 		"ObserveOnlyPolicyNotCreated": {
 			reason: "Management policies without Create are refused for a resource that created nothing.",
-			cr:     newClient(policies(xpv2.ManagementActionObserve)),
+			cr:     newClient(policies(xpv2.ManagementActionObserve, xpv2.ManagementActionUpdate)),
 			server: existing(true),
-			want:   want{err: errors.New("adoption is not supported")},
+			want:   want{err: errors.New("lack Create")},
 		},
 		"ObserveOnlyPolicyOwned": {
-			reason: "A resource that created its client may drop Create from its policies later.",
+			reason: "Observe-only policies are refused even for an owned client: they lack Update.",
 			cr:     newClient(owned, public, policies(xpv2.ManagementActionObserve)),
 			server: existing(false),
+			want:   want{err: errors.New("lack Update")},
+		},
+		"DeletingWithoutUpdatePolicy": {
+			reason: "Policies are not checked while deleting, so deletion is never blocked by them.",
+			cr:     newClient(owned, deleting, policies(xpv2.ManagementActionObserve, xpv2.ManagementActionDelete)),
+			server: existing(true),
 			want: want{
-				obs: managed.ExternalObservation{
-					ResourceExists:   true,
-					ResourceUpToDate: true,
-					ConnectionDetails: managed.ConnectionDetails{
-						client.ConnectionKeyClientID: []byte(testID),
-						client.ConnectionKeyIssuer:   []byte(testIssuer),
-					},
-				},
+				obs:   managed.ExternalObservation{ResourceExists: true, ResourceUpToDate: true},
 				calls: []string{"GET /clients/app"},
-				ready: "True",
 			},
 		},
 		"DeletingNotOwned": {
@@ -236,7 +236,7 @@ func TestObserve(t *testing.T) {
 			if tc.server != nil {
 				f.put(tc.server)
 			}
-			e := client.NewExternal(f.api(t), testIssuer)
+			e := newExternal(t, f, tc.cr)
 
 			got, err := e.Observe(context.Background(), tc.cr)
 
@@ -260,7 +260,7 @@ func TestObserveFillsAtProvider(t *testing.T) {
 	f.put(existing(true))
 	cr := newClient(owned)
 
-	if _, err := client.NewExternal(f.api(t), testIssuer).Observe(context.Background(), cr); err != nil {
+	if _, err := newExternal(t, f, cr).Observe(context.Background(), cr); err != nil {
 		t.Fatalf("Observe: %v", err)
 	}
 
@@ -270,20 +270,17 @@ func TestObserveFillsAtProvider(t *testing.T) {
 	}
 }
 
-// checkErr compares err with either an exact message substring or a wrapped
-// sentinel.
+// checkErr checks err against an expected message substring and an expected
+// wrapped sentinel; with neither, err must be nil.
 func checkErr(t *testing.T, reason string, err, want, wantIs error) {
 	t.Helper()
-	switch {
-	case wantIs != nil:
-		if !errors.Is(err, wantIs) {
-			t.Errorf("%s\nerror = %v, want one wrapping %v", reason, err, wantIs)
-		}
-	case want != nil:
-		if err == nil || !strings.Contains(err.Error(), want.Error()) {
-			t.Errorf("%s\nerror = %v, want one containing %q", reason, err, want)
-		}
-	case err != nil:
+	if wantIs != nil && !errors.Is(err, wantIs) {
+		t.Errorf("%s\nerror = %v, want one wrapping %v", reason, err, wantIs)
+	}
+	if want != nil && (err == nil || !strings.Contains(err.Error(), want.Error())) {
+		t.Errorf("%s\nerror = %v, want one containing %q", reason, err, want)
+	}
+	if want == nil && wantIs == nil && err != nil {
 		t.Errorf("%s\nunexpected error: %v", reason, err)
 	}
 }

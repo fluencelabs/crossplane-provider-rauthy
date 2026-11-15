@@ -40,16 +40,15 @@ func SetupGated(mgr ctrl.Manager, o controller.Options) error {
 func Setup(mgr ctrl.Manager, o controller.Options) error {
 	name := managed.ControllerName(v1alpha1.ClientGroupKind)
 
-	opts := []managed.ReconcilerOption{
-		managed.WithTypedExternalConnector[*v1alpha1.Client](&Connector{
-			Kube:  mgr.GetClient(),
-			Usage: resource.NewProviderConfigUsageTracker(mgr.GetClient(), &v1alpha1.ProviderConfigUsage{}),
-		}),
+	opts := append(ReconcilerOptions(&Connector{
+		Kube:  mgr.GetClient(),
+		Usage: resource.NewProviderConfigUsageTracker(mgr.GetClient(), &v1alpha1.ProviderConfigUsage{}),
+	}),
 		managed.WithLogger(o.Logger.WithValues("controller", name)),
 		managed.WithPollInterval(o.PollInterval),
 		//nolint:staticcheck // crossplane-runtime has not moved to the new events API yet.
 		managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))),
-	}
+	)
 	if o.Features.Enabled(feature.EnableBetaManagementPolicies) {
 		opts = append(opts, managed.WithManagementPolicies())
 	}
@@ -80,6 +79,18 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 		return fmt.Errorf("cannot build the Client controller: %w", err)
 	}
 	return nil
+}
+
+// ReconcilerOptions are the options every Client reconciler is built with;
+// Setup adds logging, events, metrics and feature flags on top.
+func ReconcilerOptions(c *Connector) []managed.ReconcilerOption {
+	return []managed.ReconcilerOption{
+		managed.WithTypedExternalConnector[*v1alpha1.Client](c),
+		// The client id is the external name, known before the create. An
+		// interrupted create is therefore safe to retry: status.ownership,
+		// not the runtime's create annotations, decides what is ours.
+		managed.WithDeterministicExternalName(true),
+	}
 }
 
 // UsageTracker records that a managed resource uses its provider config.
@@ -130,5 +141,5 @@ func (c *Connector) Connect(
 	if err != nil {
 		return nil, fmt.Errorf("cannot build the Rauthy client: %w", err)
 	}
-	return NewExternal(api, issuerFor(pc.Spec.URL, pc.Spec.IssuerURL)), nil
+	return NewExternal(api, c.Kube.Status(), issuerFor(pc.Spec.URL, pc.Spec.IssuerURL)), nil
 }

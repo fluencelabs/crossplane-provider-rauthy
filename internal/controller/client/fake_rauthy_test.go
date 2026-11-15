@@ -24,8 +24,10 @@ type fakeRauthy struct {
 	failPut bool
 	// failPost makes every POST answer 500 without creating anything.
 	failPost bool
-	authz    string
-	srv      *httptest.Server
+	// failDelete makes every DELETE answer 500.
+	failDelete bool
+	authz      string
+	srv        *httptest.Server
 }
 
 func newFakeRauthy(t *testing.T) *fakeRauthy {
@@ -148,6 +150,10 @@ func (f *fakeRauthy) byID(w http.ResponseWriter, r *http.Request, id string) {
 	case http.MethodPut:
 		f.update(w, r, id)
 	case http.MethodDelete:
+		if f.failDelete {
+			writeError(w, http.StatusInternalServerError, "database unavailable")
+			return
+		}
 		delete(f.clients, id)
 		w.WriteHeader(http.StatusOK)
 	default:

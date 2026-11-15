@@ -8,6 +8,8 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
 	"github.com/fluencelabs/rauthy-go"
 	"github.com/google/go-cmp/cmp"
+	kube "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/fluencelabs/crossplane-provider-rauthy/apis/v1alpha1"
 	"github.com/fluencelabs/crossplane-provider-rauthy/internal/controller/client"
@@ -16,45 +18,90 @@ import (
 func TestCreate(t *testing.T) {
 	t.Parallel()
 
+	statusFails := interceptor.Funcs{
+		SubResourcePatch: func(context.Context, kube.Client, string, kube.Object, kube.Patch, ...kube.SubResourcePatchOption) error {
+			return errors.New("status write refused")
+		},
+	}
+
 	cases := map[string]struct {
 		reason    string
 		cr        *v1alpha1.Client
 		server    *rauthy.ClientResponse
 		failPost  bool
+		failDel   bool
+		intercept *interceptor.Funcs
 		wantErr   error
 		wantErrIs error
 		wantCalls []string
-		// wantOwnedID is the created-client-id annotation Create must leave.
+		// wantOwnedID is the status.ownership the API server holds afterwards.
 		wantOwnedID string
+		wantRemain  bool
 	}{
 		"PostOnly": {
-			reason:      "Create issues only the POST and records the created id.",
+			reason:      "Create issues only the POST and records ownership in status.",
 			cr:          newClient(),
 			wantCalls:   []string{"POST /clients"},
 			wantOwnedID: testID,
+			wantRemain:  true,
 		},
 		"ExistingIDIsAdoption": {
-			reason:    "A POST refused because the id exists is an adoption error and records no ownership.",
-			cr:        newClient(),
-			server:    existing(true),
-			wantErrIs: client.ErrAdoption,
-			wantCalls: []string{"POST /clients", "GET /clients/app"},
+			reason:     "A POST refused (4xx) because the id exists is an adoption error and records nothing.",
+			cr:         newClient(),
+			server:     existing(true),
+			wantErrIs:  client.ErrAdoption,
+			wantErr:    errors.New("was not created by this resource"),
+			wantCalls:  []string{"POST /clients", "GET /clients/app"},
+			wantRemain: true,
 		},
 		"ExistingIDDropsStaleOwnership": {
-			reason: "A re-create that hits a foreign client drops the record of the old client.",
-			cr: newClient(owned, func(cr *v1alpha1.Client) {
-				meta.SetExternalCreatePending(cr, meta.GetExternalCreateSucceeded(cr))
-			}),
-			server:    existing(true),
-			wantErrIs: client.ErrAdoption,
-			wantCalls: []string{"POST /clients", "GET /clients/app"},
+			reason:     "A re-create clears the record of the vanished client before the POST.",
+			cr:         newClient(owned),
+			server:     existing(true),
+			wantErrIs:  client.ErrAdoption,
+			wantCalls:  []string{"POST /clients", "GET /clients/app"},
+			wantRemain: true,
+		},
+		"AmbiguousFailure": {
+			reason: "A 5xx POST after which the client exists is an unknown outcome, never ownership.",
+			cr:     newClient(),
+			server: existing(true),
+			// failPost answers 500 even though the client exists.
+			failPost:   true,
+			wantErrIs:  client.ErrAdoption,
+			wantErr:    errors.New("create outcome unknown"),
+			wantCalls:  []string{"POST /clients", "GET /clients/app"},
+			wantRemain: true,
 		},
 		"ServerError": {
-			reason:    "Any other POST failure is a plain create error.",
+			reason:    "A failed POST after which no client exists is a plain create error.",
 			cr:        newClient(),
 			failPost:  true,
 			wantErr:   errors.New("cannot create Rauthy client"),
 			wantCalls: []string{"POST /clients", "GET /clients/app"},
+		},
+		"OwnershipNotRecordedRollsBack": {
+			reason:    "If ownership cannot be recorded, the new client is deleted again so a retry starts clean.",
+			cr:        newClient(),
+			intercept: &statusFails,
+			wantErr:   errors.New("was deleted again and will be recreated"),
+			wantCalls: []string{"POST /clients", "DELETE /clients/app"},
+		},
+		"OwnershipNotRecordedNoRollback": {
+			reason:     "If the rollback fails too, the error says what a human must delete.",
+			cr:         newClient(),
+			intercept:  &statusFails,
+			failDel:    true,
+			wantErr:    errors.New(`delete client "app" in Rauthy to retry`),
+			wantCalls:  []string{"POST /clients", "DELETE /clients/app"},
+			wantRemain: true,
+		},
+		"StaleOwnershipNotCleared": {
+			reason:      "If the stale record cannot be cleared, nothing is created.",
+			cr:          newClient(owned),
+			intercept:   &statusFails,
+			wantErr:     errors.New("not creating client"),
+			wantOwnedID: testID,
 		},
 		"InvalidID": {
 			reason:  "An invalid id fails before any request.",
@@ -67,11 +114,15 @@ func TestCreate(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			f := newFakeRauthy(t)
-			f.failPost = tc.failPost
+			f.failPost, f.failDelete = tc.failPost, tc.failDel
 			if tc.server != nil {
 				f.put(tc.server)
 			}
-			e := client.NewExternal(f.api(t), testIssuer)
+			k := newKube(t, tc.cr)
+			if tc.intercept != nil {
+				k = interceptor.NewClient(k.(kube.WithWatch), *tc.intercept)
+			}
+			e := client.NewExternal(f.api(t), k.Status(), testIssuer)
 
 			_, err := e.Create(context.Background(), tc.cr)
 
@@ -79,8 +130,11 @@ func TestCreate(t *testing.T) {
 			if diff := cmp.Diff(tc.wantCalls, f.callLog()); diff != "" {
 				t.Errorf("%s\nRauthy calls: -want, +got:\n%s", tc.reason, diff)
 			}
-			if got := tc.cr.GetAnnotations()[client.AnnotationKeyCreatedClientID]; got != tc.wantOwnedID {
-				t.Errorf("%s\ncreated-client-id = %q, want %q", tc.reason, got, tc.wantOwnedID)
+			if got := storedOwnership(t, k, tc.cr); got != tc.wantOwnedID {
+				t.Errorf("%s\nstatus.ownership on the API server = %q, want %q", tc.reason, got, tc.wantOwnedID)
+			}
+			if remains := f.stored() != nil; remains != tc.wantRemain {
+				t.Errorf("%s\nclient remains in Rauthy = %v, want %v", tc.reason, remains, tc.wantRemain)
 			}
 		})
 	}
@@ -93,7 +147,7 @@ func TestCreateSendsOnlyCreateFields(t *testing.T) {
 		cr.Spec.ForProvider.AccessTokenLifetime = new(int64(600))
 	})
 
-	if err := runtimeCreate(t, client.NewExternal(f.api(t), testIssuer), cr); err != nil {
+	if err := runtimeCreate(t, newExternal(t, f, cr), cr); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -110,11 +164,11 @@ func TestPartialCreateConverges(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	f := newFakeRauthy(t)
-	e := client.NewExternal(f.api(t), testIssuer)
 	cr := newClient(func(cr *v1alpha1.Client) {
 		cr.Spec.ForProvider.AccessTokenLifetime = new(int64(600))
 		cr.Spec.ForProvider.FlowsEnabled = []string{"authorization_code", "refresh_token"}
 	})
+	e := newExternal(t, f, cr)
 
 	obs, err := e.Observe(ctx, cr)
 	if err != nil || obs.ResourceExists {
@@ -168,7 +222,7 @@ func TestUpdatePreservesUnsetFields(t *testing.T) {
 		cr.Spec.ForProvider.Enabled = new(false)
 	})
 
-	if _, err := client.NewExternal(f.api(t), testIssuer).Update(context.Background(), cr); err != nil {
+	if _, err := newExternal(t, f, cr).Update(context.Background(), cr); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 
@@ -186,7 +240,8 @@ func TestUpdateRefusesForeignClient(t *testing.T) {
 	f := newFakeRauthy(t)
 	f.put(existing(true))
 
-	_, err := client.NewExternal(f.api(t), testIssuer).Update(context.Background(), newClient())
+	cr := newClient(forged)
+	_, err := newExternal(t, f, cr).Update(context.Background(), cr)
 
 	if err == nil {
 		t.Fatal("Update of a client this resource did not create succeeded")
@@ -213,8 +268,8 @@ func TestDelete(t *testing.T) {
 			wantCalls: []string{"DELETE /clients/app"},
 		},
 		"NotOwned": {
-			reason:     "A client this resource did not create is never deleted.",
-			cr:         newClient(deleting),
+			reason:     "A client this resource did not create is never deleted, whatever its annotations say.",
+			cr:         newClient(forged, deleting),
 			server:     existing(true),
 			wantRemain: true,
 		},
@@ -233,7 +288,7 @@ func TestDelete(t *testing.T) {
 				f.put(tc.server)
 			}
 
-			_, err := client.NewExternal(f.api(t), testIssuer).Delete(context.Background(), tc.cr)
+			_, err := newExternal(t, f, tc.cr).Delete(context.Background(), tc.cr)
 			if err != nil {
 				t.Errorf("%s\nDelete: %v", tc.reason, err)
 			}
@@ -256,10 +311,11 @@ func TestNoAdoptionEndToEnd(t *testing.T) {
 	foreign := existing(true)
 	foreign.AccessTokenLifetime = 42
 	f.put(foreign)
-	e := client.NewExternal(f.api(t), testIssuer)
-	cr := newClient(func(cr *v1alpha1.Client) {
+	// The manifest carries every annotation a successful create would leave.
+	cr := newClient(forged, func(cr *v1alpha1.Client) {
 		cr.Spec.ForProvider.AccessTokenLifetime = new(int64(600))
 	})
+	e := newExternal(t, f, cr)
 
 	obs, err := e.Observe(ctx, cr)
 	if !errors.Is(err, client.ErrAdoption) || obs.ResourceExists || obs.ConnectionDetails != nil {
@@ -291,4 +347,17 @@ func TestNoAdoptionEndToEnd(t *testing.T) {
 			t.Errorf("unexpected call to Rauthy: %s", c)
 		}
 	}
+}
+
+// storedOwnership returns status.ownership.clientID as the API server holds it.
+func storedOwnership(t *testing.T, k kube.Client, cr *v1alpha1.Client) string {
+	t.Helper()
+	got := &v1alpha1.Client{}
+	if err := k.Get(context.Background(), kube.ObjectKeyFromObject(cr), got); err != nil {
+		t.Fatalf("get the Client: %v", err)
+	}
+	if got.Status.Ownership == nil {
+		return ""
+	}
+	return got.Status.Ownership.ClientID
 }
