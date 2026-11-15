@@ -28,10 +28,14 @@ const (
 var ErrAdoption = errors.New("adoption is not supported")
 
 var (
-	errEmptyID          = errors.New("the client id (the external name) is empty")
-	errInvalidID        = errors.New("invalid client id")
-	errNotOwned         = errors.New("refusing to modify a Rauthy client this resource did not create")
-	errIDChanged        = errors.New("the client id is immutable")
+	errEmptyID           = errors.New("the client id (the external name) is empty")
+	errInvalidID         = errors.New("invalid client id")
+	errRefused           = errors.New("the create was refused")
+	errNotOwned          = errors.New("refusing to modify a Rauthy client this resource did not create")
+	errIDChanged         = errors.New("the client id is immutable")
+	errCRDLacksOwnership = errors.New(
+		"the installed Client CRD does not keep status.ownership; upgrade the provider's CRDs",
+	)
 	errPoliciesNoUpdate = errors.New(
 		"lack Update: the client can only be brought to the spec by an update, so Update (or *) is required",
 	)
@@ -60,41 +64,51 @@ type api interface {
 type external struct {
 	api    api
 	status kube.SubResourceWriter
+	// reader reads the Client from the API server, bypassing the cache.
+	reader kube.Reader
 	issuer string
+	// confirmed is the client id whose ownership an uncached read confirmed
+	// during this reconcile.
+	confirmed string
 }
 
 // NewExternal returns the external client for a Rauthy instance. status writes
-// the Client status subresource, where ownership is recorded; issuer is
-// published to consumers in the connection details.
+// the Client status subresource, where ownership is recorded; reader must read
+// Clients from the API server without a cache, to confirm ownership before
+// acting on it; issuer is published to consumers in the connection details.
 func NewExternal(
 	c *rauthy.Client,
 	status kube.SubResourceWriter,
+	reader kube.Reader,
 	issuer string,
 ) managed.TypedExternalClient[*v1alpha1.Client] {
-	return &external{api: c, status: status, issuer: issuer}
+	return &external{api: c, status: status, reader: reader, issuer: issuer}
 }
 
+// Observe reads the client and decides whether this resource owns it. The
+// cached object only decides cheap refusals; anything that would act as the
+// owner (reporting the client as existing, reading its secret, and the Update
+// and Delete that follow) needs ownership confirmed by an uncached read.
 func (e *external) Observe(ctx context.Context, cr *v1alpha1.Client) (managed.ExternalObservation, error) {
 	id := meta.GetExternalName(cr)
-	ownedID := ownedClientID(cr)
-	owned := ownedID != ""
-
-	if owned && ownedID != id {
+	if owned := ownedClientID(cr); owned != "" && owned != id {
 		return managed.ExternalObservation{}, fmt.Errorf(
 			"%w: this resource created client %q but its external name is now %q; restore the external name",
-			errIDChanged, ownedID, id,
+			errIDChanged, owned, id,
 		)
 	}
-	if !owned && meta.WasDeleted(cr) {
-		// Nothing of ours exists, so there is nothing to delete: let the
-		// resource go without touching Rauthy.
-		return managed.ExternalObservation{ResourceExists: false}, nil
+	if meta.WasDeleted(cr) && ownedClientID(cr) == "" {
+		// The cache says nothing of ours exists. Confirm before letting the
+		// resource go: a lagging cache must not leak an owned client.
+		if _, ok, err := e.confirmOwnership(ctx, cr, id); err != nil || !ok {
+			return managed.ExternalObservation{ResourceExists: false}, err
+		}
 	}
 	if err := validateClientID(id); err != nil {
 		return managed.ExternalObservation{}, err
 	}
 	if !meta.WasDeleted(cr) {
-		if err := checkPolicies(cr, owned); err != nil {
+		if err := checkPolicies(cr, ownedClientID(cr) != ""); err != nil {
 			return managed.ExternalObservation{}, err
 		}
 	}
@@ -106,15 +120,26 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Client) (managed.Ex
 	if err != nil {
 		return managed.ExternalObservation{}, fmt.Errorf("cannot get Rauthy client %q: %w", id, err)
 	}
-	if !owned {
-		if meta.ExternalCreateIncomplete(cr) {
-			// A create of ours was interrupted before ownership was recorded.
-			// The client may be ours, but that cannot be proven.
-			return managed.ExternalObservation{}, outcomeUnknownError(id)
-		}
-		return managed.ExternalObservation{}, adoptionError(id)
-	}
 
+	fresh, ok, err := e.confirmOwnership(ctx, cr, id)
+	if err != nil {
+		return managed.ExternalObservation{}, err
+	}
+	if !ok {
+		if meta.WasDeleted(cr) {
+			return managed.ExternalObservation{ResourceExists: false}, nil
+		}
+		return managed.ExternalObservation{}, notOwnedError(fresh, id)
+	}
+	return e.observeOwned(ctx, cr, got)
+}
+
+// observeOwned reports a client whose ownership is confirmed.
+func (e *external) observeOwned(
+	ctx context.Context,
+	cr *v1alpha1.Client,
+	got *rauthy.ClientResponse,
+) (managed.ExternalObservation, error) {
 	cr.Status.AtProvider = observation(got)
 	if meta.WasDeleted(cr) {
 		// Deleting an owned client: existence is all the reconciler needs.
@@ -158,12 +183,23 @@ func (e *external) Create(ctx context.Context, cr *v1alpha1.Client) (managed.Ext
 	}
 
 	if _, err := e.api.CreateClient(ctx, createRequest(id, &cr.Spec.ForProvider)); err != nil {
-		return managed.ExternalCreation{}, e.createFailed(ctx, id, err)
+		err = e.createFailed(ctx, id, err)
+		// Persisted by the runtime with its create-failed mark; it only
+		// chooses the wording of later errors.
+		if errors.Is(err, errRefused) {
+			meta.AddAnnotations(cr, map[string]string{AnnotationKeyCreateRefused: id})
+		} else {
+			meta.RemoveAnnotations(cr, AnnotationKeyCreateRefused)
+		}
+		return managed.ExternalCreation{}, err
 	}
 
 	if err := setOwnership(ctx, e.status, cr, id); err != nil {
+		cr.Status.Ownership = nil
+		meta.RemoveAnnotations(cr, AnnotationKeyCreateRefused)
 		return managed.ExternalCreation{}, e.unrecorded(ctx, id, err)
 	}
+	meta.RemoveAnnotations(cr, AnnotationKeyCreateRefused)
 	return managed.ExternalCreation{}, nil
 }
 
@@ -177,7 +213,7 @@ func (e *external) createFailed(ctx context.Context, id string, postErr error) e
 		return fmt.Errorf("cannot create Rauthy client %q: %w", id, postErr)
 	}
 	if isClientError(postErr) {
-		return fmt.Errorf("%w (%w)", adoptionError(id), postErr)
+		return fmt.Errorf("%w (%w: %w)", adoptionError(id), errRefused, postErr)
 	}
 	return fmt.Errorf("%w (%w)", outcomeUnknownError(id), postErr)
 }
@@ -203,7 +239,11 @@ func (e *external) unrecorded(ctx context.Context, id string, recordErr error) e
 
 func (e *external) Update(ctx context.Context, cr *v1alpha1.Client) (managed.ExternalUpdate, error) {
 	id := meta.GetExternalName(cr)
-	if !ownsClient(cr, id) {
+	owned, err := e.ensureOwned(ctx, cr, id)
+	if err != nil {
+		return managed.ExternalUpdate{}, err
+	}
+	if !owned {
 		return managed.ExternalUpdate{}, fmt.Errorf("client %q: %w", id, errNotOwned)
 	}
 
@@ -228,12 +268,16 @@ func (e *external) Delete(ctx context.Context, cr *v1alpha1.Client) (managed.Ext
 	id := meta.GetExternalName(cr)
 	cr.SetConditions(xpv2.Deleting())
 
-	if !ownsClient(cr, id) {
+	owned, err := e.ensureOwned(ctx, cr, id)
+	if err != nil {
+		return managed.ExternalDelete{}, err
+	}
+	if !owned {
 		// Never delete a client this resource did not create.
 		return managed.ExternalDelete{}, nil
 	}
 
-	if err := e.api.DeleteClient(ctx, id); err != nil && !rauthy.IsNotFound(err) {
+	if err = e.api.DeleteClient(ctx, id); err != nil && !rauthy.IsNotFound(err) {
 		return managed.ExternalDelete{}, fmt.Errorf("cannot delete Rauthy client %q: %w", id, err)
 	}
 	return managed.ExternalDelete{}, nil

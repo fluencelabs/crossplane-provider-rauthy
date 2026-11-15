@@ -26,6 +26,12 @@ type fakeRauthy struct {
 	failPost bool
 	// failDelete makes every DELETE answer 500.
 	failDelete bool
+	// commitThenFail makes POST create the client and still answer 500, as
+	// when the response is lost.
+	commitThenFail bool
+	// raceOnPost, when set, is stored under the requested id just before the
+	// next POST is handled: a third party taking the id first.
+	raceOnPost *rauthy.ClientResponse
 	authz      string
 	srv        *httptest.Server
 }
@@ -73,6 +79,18 @@ func (f *fakeRauthy) callLog() []string {
 	return append([]string(nil), f.calls...)
 }
 
+func (f *fakeRauthy) deleteStored() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.clients, testID)
+}
+
+func (f *fakeRauthy) resetCalls() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = nil
+}
+
 func (f *fakeRauthy) lastAuthorization() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -83,13 +101,19 @@ func (f *fakeRauthy) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	path := strings.TrimPrefix(r.URL.Path, rauthy.APIBasePath)
+	path, ok := strings.CutPrefix(r.URL.Path, rauthy.APIBasePath)
+	if !ok {
+		// Not the API: something on the host probing the test port. Neither
+		// recorded nor answered as Rauthy.
+		writeError(w, http.StatusNotFound, "not the Rauthy API")
+		return
+	}
 	f.calls = append(f.calls, r.Method+" "+path)
 	f.authz = r.Header.Get("Authorization")
 
-	rest, ok := strings.CutPrefix(path, "/clients")
+	rest, isClients := strings.CutPrefix(path, "/clients")
 	switch {
-	case !ok:
+	case !isClients:
 		writeError(w, http.StatusNotFound, "no such route")
 	case rest == "" && r.Method == http.MethodPost:
 		f.create(w, r)
@@ -111,6 +135,12 @@ func (f *fakeRauthy) create(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if f.raceOnPost != nil {
+		cp := *f.raceOnPost
+		cp.ID = req.ID
+		f.clients[req.ID] = &cp
+		f.raceOnPost = nil
 	}
 	if _, exists := f.clients[req.ID]; exists {
 		writeError(w, http.StatusBadRequest, "client id already exists")
@@ -135,6 +165,10 @@ func (f *fakeRauthy) create(w http.ResponseWriter, r *http.Request) {
 		c.Challenges = []string{"S256"}
 	}
 	f.clients[req.ID] = c
+	if f.commitThenFail {
+		writeError(w, http.StatusInternalServerError, "connection reset")
+		return
+	}
 	writeJSON(w, c)
 }
 

@@ -122,13 +122,18 @@ func TestCreate(t *testing.T) {
 			if tc.intercept != nil {
 				k = interceptor.NewClient(k.(kube.WithWatch), *tc.intercept)
 			}
-			e := client.NewExternal(f.api(t), k.Status(), testIssuer)
+			e := client.NewExternal(f.api(t), k.Status(), k, testIssuer)
 
 			_, err := e.Create(context.Background(), tc.cr)
 
 			checkErr(t, tc.reason, err, tc.wantErr, tc.wantErrIs)
 			if diff := cmp.Diff(tc.wantCalls, f.callLog()); diff != "" {
 				t.Errorf("%s\nRauthy calls: -want, +got:\n%s", tc.reason, diff)
+			}
+			// The in-memory record must match the stored one: the runtime's
+			// final status update writes the in-memory object.
+			if got := inMemoryOwnership(tc.cr); got != tc.wantOwnedID {
+				t.Errorf("%s\nstatus.ownership in memory = %q, want %q", tc.reason, got, tc.wantOwnedID)
 			}
 			if got := storedOwnership(t, k, tc.cr); got != tc.wantOwnedID {
 				t.Errorf("%s\nstatus.ownership on the API server = %q, want %q", tc.reason, got, tc.wantOwnedID)
@@ -360,4 +365,11 @@ func storedOwnership(t *testing.T, k kube.Client, cr *v1alpha1.Client) string {
 		return ""
 	}
 	return got.Status.Ownership.ClientID
+}
+
+func inMemoryOwnership(cr *v1alpha1.Client) string {
+	if cr.Status.Ownership == nil {
+		return ""
+	}
+	return cr.Status.Ownership.ClientID
 }

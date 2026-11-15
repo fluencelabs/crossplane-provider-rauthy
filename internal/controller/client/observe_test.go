@@ -88,6 +88,31 @@ func TestObserve(t *testing.T) {
 				calls: []string{"GET /clients/app"},
 			},
 		},
+		"RefusedCreateOnRecord": {
+			reason: "After Rauthy refused this resource's create, the client is reported as somebody else's.",
+			cr: newClient(func(cr *v1alpha1.Client) {
+				meta.SetExternalCreatePending(cr, time.Now())
+				meta.SetExternalCreateFailed(cr, time.Now())
+				meta.AddAnnotations(cr, map[string]string{client.AnnotationKeyCreateRefused: testID})
+			}),
+			server: existing(true),
+			want: want{
+				err:   errors.New("was not created by this resource"),
+				calls: []string{"GET /clients/app"},
+			},
+		},
+		"AmbiguousCreateOnRecord": {
+			reason: "After an ambiguous create failed, the outcome stays unknown rather than foreign.",
+			cr: newClient(func(cr *v1alpha1.Client) {
+				meta.SetExternalCreatePending(cr, time.Now())
+				meta.SetExternalCreateFailed(cr, time.Now())
+			}),
+			server: existing(true),
+			want: want{
+				err:   errors.New("create outcome unknown"),
+				calls: []string{"GET /clients/app"},
+			},
+		},
 		"OwnedConfidentialUpToDate": {
 			reason: "An owned, matching confidential client is up to date and publishes its secret.",
 			cr:     newClient(owned),
@@ -282,5 +307,41 @@ func checkErr(t *testing.T, reason string, err, want, wantIs error) {
 	}
 	if want == nil && wantIs == nil && err != nil {
 		t.Errorf("%s\nunexpected error: %v", reason, err)
+	}
+}
+
+// TestStaleCachedOwnershipIsNotTrusted: the cached object says owned, the API
+// server says not. Nothing may act as the owner.
+func TestStaleCachedOwnershipIsNotTrusted(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newFakeRauthy(t)
+	foreign := existing(true)
+	f.put(foreign)
+	truth := newClient(func(cr *v1alpha1.Client) {
+		meta.AddAnnotations(cr, map[string]string{client.AnnotationKeyCreateRefused: testID})
+	})
+	k := newKube(t, truth)
+	stale := truth.DeepCopy()
+	owned(stale)
+
+	obs, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Observe(ctx, stale.DeepCopy())
+	if !errors.Is(err, client.ErrAdoption) || obs.ResourceExists || obs.ConnectionDetails != nil {
+		t.Errorf("Observe = %+v, %v; want an adoption error and nothing published", obs, err)
+	}
+	if _, err = client.NewExternal(f.api(t), k.Status(), k, testIssuer).Update(ctx, stale.DeepCopy()); err == nil {
+		t.Error("Update trusted the cached ownership")
+	}
+	gone := stale.DeepCopy()
+	deleting(gone)
+	if _, err = client.NewExternal(f.api(t), k.Status(), k, testIssuer).Delete(ctx, gone); err != nil {
+		t.Errorf("Delete: %v", err)
+	}
+
+	if diff := cmp.Diff([]string{"GET /clients/app"}, f.callLog()); diff != "" {
+		t.Errorf("Rauthy calls: -want, +got:\n%s", diff)
+	}
+	if diff := cmp.Diff(foreign, f.stored()); diff != "" {
+		t.Errorf("the foreign client changed: -want, +got:\n%s", diff)
 	}
 }

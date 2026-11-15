@@ -41,8 +41,9 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 	name := managed.ControllerName(v1alpha1.ClientGroupKind)
 
 	opts := append(ReconcilerOptions(&Connector{
-		Kube:  mgr.GetClient(),
-		Usage: resource.NewProviderConfigUsageTracker(mgr.GetClient(), &v1alpha1.ProviderConfigUsage{}),
+		Kube:   mgr.GetClient(),
+		Reader: mgr.GetAPIReader(),
+		Usage:  resource.NewProviderConfigUsageTracker(mgr.GetClient(), &v1alpha1.ProviderConfigUsage{}),
 	}),
 		managed.WithLogger(o.Logger.WithValues("controller", name)),
 		managed.WithPollInterval(o.PollInterval),
@@ -100,8 +101,13 @@ type UsageTracker interface {
 
 // Connector builds an external client from a Client's ClusterProviderConfig.
 type Connector struct {
-	Kube  kube.Client
-	Usage UsageTracker
+	// Kube is the manager's (cached) client.
+	Kube kube.Client
+	// Reader reads from the API server without a cache; ownership is
+	// confirmed through it. Kube is used when it is nil, which is only right
+	// for a client that has no cache.
+	Reader kube.Reader
+	Usage  UsageTracker
 }
 
 // Connect resolves the ClusterProviderConfig, reads the API key and returns a
@@ -141,5 +147,9 @@ func (c *Connector) Connect(
 	if err != nil {
 		return nil, fmt.Errorf("cannot build the Rauthy client: %w", err)
 	}
-	return NewExternal(api, c.Kube.Status(), issuerFor(pc.Spec.URL, pc.Spec.IssuerURL)), nil
+	reader := c.Reader
+	if reader == nil {
+		reader = c.Kube
+	}
+	return NewExternal(api, c.Kube.Status(), reader, issuerFor(pc.Spec.URL, pc.Spec.IssuerURL)), nil
 }

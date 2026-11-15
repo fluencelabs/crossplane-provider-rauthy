@@ -127,7 +127,7 @@ func connectAndObserve(
 	if err := v1alpha1.SchemeBuilder.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
-	kube := fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(objects...).Build()
+	kube := fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(append(objects, cr.DeepCopy())...).Build()
 	tracker := &noopTracker{}
 	c := &client.Connector{Kube: kube, Usage: tracker}
 

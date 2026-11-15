@@ -89,7 +89,8 @@ func newKube(t *testing.T, objs ...*v1alpha1.Client) kube.Client {
 // status to a fake API server that holds cr.
 func newExternal(t *testing.T, f *fakeRauthy, cr *v1alpha1.Client) managed.TypedExternalClient[*v1alpha1.Client] {
 	t.Helper()
-	return client.NewExternal(f.api(t), newKube(t, cr).Status(), testIssuer)
+	k := newKube(t, cr)
+	return client.NewExternal(f.api(t), k.Status(), k, testIssuer)
 }
 
 func public(cr *v1alpha1.Client) { cr.Spec.ForProvider.Confidential = false }
