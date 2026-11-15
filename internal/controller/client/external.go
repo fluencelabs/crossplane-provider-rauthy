@@ -105,11 +105,8 @@ func newExternal(c api, status kube.SubResourceWriter, reader kube.Reader, issue
 // Delete that follow) needs ownership confirmed by an uncached read.
 func (e *external) Observe(ctx context.Context, cr *v1alpha1.Client) (managed.ExternalObservation, error) {
 	id := meta.GetExternalName(cr)
-	if owned := ownedClientID(cr); owned != "" && owned != id {
-		return managed.ExternalObservation{}, fmt.Errorf(
-			"%w: this resource created client %q but its external name is now %q; restore the external name",
-			errIDChanged, owned, id,
-		)
+	if err := checkRecordID(cr, id); err != nil {
+		return managed.ExternalObservation{}, err
 	}
 	if release, err := e.releasable(ctx, cr); err != nil || release {
 		return managed.ExternalObservation{ResourceExists: false}, err
@@ -166,6 +163,9 @@ func (e *external) releasable(ctx context.Context, cr *v1alpha1.Client) (bool, e
 		return false, err
 	}
 	cr.Status.Ownership = fresh.Status.Ownership
+	if err = checkRecordID(fresh, meta.GetExternalName(cr)); err != nil {
+		return false, err
+	}
 	return fresh.Status.Ownership == nil, nil
 }
 
@@ -196,6 +196,11 @@ func (e *external) clearStaleMarker(ctx context.Context, cr *v1alpha1.Client) er
 	cr.Status.Ownership = fresh.Status.Ownership
 	if fresh.Status.Ownership == nil {
 		return nil
+	}
+	// Only a record for this very id may be cleared: one naming another id
+	// belongs to a client that still exists under that id.
+	if err = checkRecordID(fresh, meta.GetExternalName(cr)); err != nil {
+		return err
 	}
 	return e.clearOwnership(ctx, cr)
 }
@@ -381,4 +386,17 @@ func diffMessage(fields []string) string {
 func isClientError(err error) bool {
 	apiErr, ok := errors.AsType[*rauthy.APIError](err)
 	return ok && apiErr.StatusCode >= http.StatusBadRequest && apiErr.StatusCode < http.StatusInternalServerError
+}
+
+// checkRecordID refuses a record that names an id other than the external
+// name: the resource created that client, which still exists under its own
+// id, so the record must be neither cleared nor treated as "nothing owned".
+func checkRecordID(cr *v1alpha1.Client, id string) error {
+	if owned := ownedClientID(cr); owned != "" && owned != id {
+		return fmt.Errorf(
+			"%w: this resource created client %q but its external name is now %q; restore the external name",
+			errIDChanged, owned, id,
+		)
+	}
+	return nil
 }

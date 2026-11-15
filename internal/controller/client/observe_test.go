@@ -489,3 +489,51 @@ func TestDeleteClearsMarker(t *testing.T) {
 		t.Errorf("stored status.ownership = %q after the delete, want none", got)
 	}
 }
+
+// TestRecordForAnotherIDIsKept: the API server's record names "app", the
+// external name is now "app2", and the cache does not show the record yet.
+// The record must be neither cleared nor read as "nothing owned", deleting or
+// not, or client "app" would leak.
+func TestRecordForAnotherIDIsKept(t *testing.T) {
+	t.Parallel()
+
+	for name, del := range map[string]bool{"Live": false, "Deleting": true} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeRauthy(t)
+			f.put(existing(true))
+			truth := newClient(owned)
+			meta.SetExternalName(truth, "app2")
+			if del {
+				deleting(truth)
+			}
+			k := newKube(t, truth)
+			cached := truth.DeepCopy()
+			cached.Status.Ownership = nil
+
+			obs, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Observe(context.Background(), cached)
+
+			checkErr(
+				t,
+				"a record for another id blocks the resource",
+				err,
+				errors.New("the client id is immutable"),
+				nil,
+			)
+			if obs.ResourceExists {
+				t.Error("reported as existing")
+			}
+			if got := storedOwnership(t, k, truth); got != testID {
+				t.Errorf("stored record = %q, want it kept for %q", got, testID)
+			}
+			if f.stored() == nil {
+				t.Error("client app is gone")
+			}
+			for _, c := range f.callLog() {
+				if !strings.HasPrefix(c, "GET") {
+					t.Errorf("unexpected call to Rauthy: %s", c)
+				}
+			}
+		})
+	}
+}

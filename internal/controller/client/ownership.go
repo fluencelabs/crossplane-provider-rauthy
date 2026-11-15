@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -131,8 +132,11 @@ func (e *external) verifyOwner(
 		return notOwned, nil, fmt.Errorf("cannot confirm ownership of client %q: %w", id, err)
 	}
 	cr.Status.Ownership = fresh.Status.Ownership
+	if err = checkRecordID(fresh, id); err != nil {
+		return notOwned, nil, err
+	}
 	rec := fresh.Status.Ownership
-	if rec == nil || rec.ClientID != id {
+	if rec == nil {
 		return notOwned, nil, nil
 	}
 	if !got.Confidential {
@@ -280,6 +284,13 @@ func (e *external) rollback(ctx context.Context, id string, cause error) error {
 			"created Rauthy client %q but could not record its ownership (%w), and could not delete it again "+
 				"(%w): the resource will refuse it; delete client %q in Rauthy to retry",
 			id, cause, err, id,
+		)
+	}
+	if errors.Is(cause, errCRDLacksOwnership) {
+		return fmt.Errorf(
+			"created Rauthy client %q but could not record its ownership, so it was deleted again; no further "+
+				"clients are created until the provider restarts with current CRDs: %w",
+			id, cause,
 		)
 	}
 	return fmt.Errorf(

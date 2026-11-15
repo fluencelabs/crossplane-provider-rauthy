@@ -392,10 +392,15 @@ func TestReconcilerCRDWithoutOwnership(t *testing.T) {
 		},
 	})
 
-	got := h.reconcile(t, 2)
+	got := h.reconcile(t, 1)
 
-	if msg := got.GetCondition(xpv2.TypeSynced).Message; !strings.Contains(msg, "does not keep status.ownership") {
+	msg := got.GetCondition(xpv2.TypeSynced).Message
+	if !strings.Contains(msg, "does not keep status.ownership") {
 		t.Errorf("Synced message = %q, want the CRD named", msg)
+	}
+	// Creates stop until a restart, so the rollback must not promise one.
+	if strings.Contains(msg, "will be recreated") || !strings.Contains(msg, "until the provider restarts") {
+		t.Errorf("Synced message = %q, want the stop explained and no recreate promised", msg)
 	}
 	if f.stored() != nil {
 		t.Error("the unrecorded client was left in Rauthy")
@@ -669,5 +674,89 @@ func TestReconcilerConfidentialFlipRefused(t *testing.T) {
 	}
 	if c := f.stored(); c == nil || !c.Confidential {
 		t.Errorf("Rauthy client = %+v, want it still confidential", c)
+	}
+}
+
+// setExternalName renames the Client on the API server and, while stale,
+// lets the cache serve the renamed object without its ownership record.
+func (h *harness) setExternalName(t *testing.T, name string, staleCache bool) {
+	t.Helper()
+	got := &v1alpha1.Client{}
+	if err := h.kube.Get(context.Background(), h.key, got); err != nil {
+		t.Fatal(err)
+	}
+	meta.SetExternalName(got, name)
+	if err := h.kube.Update(context.Background(), got); err != nil {
+		t.Fatal(err)
+	}
+	h.cache.stale = nil
+	if staleCache {
+		stale := got.DeepCopy()
+		stale.Status.Ownership = nil
+		h.cache.stale = stale
+	}
+}
+
+func TestReconcilerRenamedClientStaysBlocked(t *testing.T) {
+	t.Parallel()
+
+	for name, del := range map[string]bool{"Live": false, "Deleting": true} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeRauthy(t)
+			h := newHarness(t, f, newClient())
+			if got := h.reconcile(t, 5); conditionStatus(got, xpv2.TypeReady) != "True" {
+				t.Fatalf("setup: Ready = %q, want True", conditionStatus(got, xpv2.TypeReady))
+			}
+			h.ageCreate(t)
+			if del {
+				if err := h.kube.Delete(context.Background(), h.reconcile(t, 0)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h.setExternalName(t, "app2", true)
+			h.reconcile(t, 3)
+			h.cache.stale = nil
+			got := h.reconcile(t, 1)
+
+			checkRenameBlocked(t, f, got)
+
+			h.setExternalName(t, testID, false)
+			checkRestoredName(t, h, f, del)
+		})
+	}
+}
+
+// checkRestoredName: once the name is restored, the resource carries on with
+// client app: deleting it deletes app, otherwise it is Ready again.
+func checkRestoredName(t *testing.T, h *harness, f *fakeRauthy, deleting bool) {
+	t.Helper()
+	got := h.reconcile(t, 3)
+	if deleting {
+		if got != nil {
+			t.Errorf("after restoring the name the resource was not finalized: %+v", got.Status.Conditions)
+		}
+		if f.stored() != nil {
+			t.Error("after restoring the name client app was not deleted")
+		}
+		return
+	}
+	if conditionStatus(got, xpv2.TypeReady) != "True" {
+		t.Errorf("after restoring the name: conditions %+v, want Ready", got.Status.Conditions)
+	}
+}
+
+// checkRenameBlocked: while the external name differs from the recorded id,
+// the resource stays put, keeps its record and leaves client app alone.
+func checkRenameBlocked(t *testing.T, f *fakeRauthy, got *v1alpha1.Client) {
+	t.Helper()
+	if got == nil {
+		t.Fatal("the resource was finalized while its client app still exists")
+	}
+	if msg := got.GetCondition(xpv2.TypeSynced).Message; !strings.Contains(msg, "the client id is immutable") {
+		t.Errorf("Synced message = %q, want the id change refused", msg)
+	}
+	if got.Status.Ownership == nil || got.Status.Ownership.ClientID != testID || f.stored() == nil {
+		t.Fatalf("record %+v, client %+v; want both kept for app", got.Status.Ownership, f.stored())
 	}
 }
