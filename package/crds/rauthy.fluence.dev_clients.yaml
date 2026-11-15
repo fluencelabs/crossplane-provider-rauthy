@@ -70,7 +70,11 @@ spec:
                   Optional fields follow one rule: leaving a field unset keeps whatever Rauthy
                   currently holds for it (the defaults Rauthy picked at creation, or a value a
                   previous spec set). Removing a field from the spec therefore does not revert
-                  it; set the value explicitly to change it.
+                  it; set the value explicitly to change it. An explicit empty list ([]) or
+                  empty string ("") means "none" and clears the field in Rauthy, except for
+                  flowsEnabled, which Rauthy requires to be non-empty. The optional lists
+                  carry no omitempty, so that an empty list survives being written back to
+                  the API server instead of turning into "unset".
                 properties:
                   accessTokenAlg:
                     description: AccessTokenAlg is the signing algorithm of access
@@ -95,7 +99,6 @@ spec:
                     items:
                       pattern: ^(http|https)://[a-z0-9.:-]+$
                       type: string
-                    minItems: 1
                     type: array
                     x-kubernetes-list-type: set
                   authCodeLifetime:
@@ -109,7 +112,7 @@ spec:
                     description: |-
                       BackchannelLogoutURI is the OIDC back-channel logout endpoint of the
                       application.
-                    pattern: ^[a-zA-Z0-9,.:/_\-&?=~#!$'()*+%@]+$
+                    pattern: ^$|^[a-zA-Z0-9,.:/_\-&?=~#!$'()*+%@]+$
                     type: string
                   challenges:
                     description: |-
@@ -120,12 +123,11 @@ spec:
                       - plain
                       - S256
                       type: string
-                    minItems: 1
                     type: array
                     x-kubernetes-list-type: set
                   clientUri:
                     description: ClientURI is an informational URI of the application.
-                    pattern: ^[a-zA-Z0-9,.:/_\-&?=~#!$'()*+%@]+$
+                    pattern: ^$|^[a-zA-Z0-9,.:/_\-&?=~#!$'()*+%@]+$
                     type: string
                   confidential:
                     description: |-
@@ -142,7 +144,6 @@ spec:
                     items:
                       pattern: ^[a-zA-Z0-9+.@/-]{0,48}$
                       type: string
-                    minItems: 1
                     type: array
                     x-kubernetes-list-type: set
                   defaultScopes:
@@ -151,7 +152,6 @@ spec:
                     items:
                       pattern: ^[a-zA-Z0-9-_/,:*.]{2,64}$
                       type: string
-                    minItems: 1
                     type: array
                     x-kubernetes-list-type: set
                   enabled:
@@ -186,7 +186,7 @@ spec:
                   name:
                     description: Name is the human-readable name shown on the login
                       page.
-                    pattern: ^[a-zA-Z0-9À-ɏ\-\s\x{3041}-\x{3096}\x{30A0}-\x{30FF}\x{3400}-\x{4DB5}\x{4E00}-\x{9FCB}\x{F900}-\x{FA6A}\x{2E80}-\x{2FD5}\x{FF66}-\x{FF9F}\x{FFA1}-\x{FFDC}\x{31F0}-\x{31FF}]{2,128}$
+                    pattern: ^$|^[a-zA-Z0-9À-ɏ\-\s\x{3041}-\x{3096}\x{30A0}-\x{30FF}\x{3400}-\x{4DB5}\x{4E00}-\x{9FCB}\x{F900}-\x{FA6A}\x{2E80}-\x{2FD5}\x{FF66}-\x{FF9F}\x{FFA1}-\x{FFDC}\x{31F0}-\x{31FF}]{2,128}$
                     type: string
                   postLogoutRedirectUris:
                     description: PostLogoutRedirectURIs are the allowed redirect URIs
@@ -194,7 +194,6 @@ spec:
                     items:
                       pattern: ^[a-zA-Z0-9,.:/_\-&?=~#!$'()*+%@]+$
                       type: string
-                    minItems: 1
                     type: array
                     x-kubernetes-list-type: set
                   redirectUris:
@@ -210,14 +209,13 @@ spec:
                     description: |-
                       RestrictGroupPrefix restricts logins to users in groups starting with
                       this prefix.
-                    pattern: ^[a-zA-Z0-9-_/,:*\s]{2,64}$
+                    pattern: ^$|^[a-zA-Z0-9-_/,:*\s]{2,64}$
                     type: string
                   scopes:
                     description: Scopes the client may request.
                     items:
                       pattern: ^[a-zA-Z0-9-_/,:*.]{2,64}$
                       type: string
-                    minItems: 1
                     type: array
                     x-kubernetes-list-type: set
                 required:

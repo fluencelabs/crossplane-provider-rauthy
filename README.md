@@ -287,7 +287,7 @@ settings listed under "Not yet supported". Only `confidential` and
 | `redirectUris`           | []string | Required, at least one.                                                    |
 | `postLogoutRedirectUris` | []string |                                                                            |
 | `allowedOrigins`         | []string | Extra CORS origins, `scheme://host[:port]` without a path.                 |
-| `flowsEnabled`           | []string | `authorization_code`, `client_credentials`, `urn:ietf:params:oauth:grant-type:device_code`, `password`, `refresh_token`. |
+| `flowsEnabled`           | []string | `authorization_code`, `client_credentials`, `urn:ietf:params:oauth:grant-type:device_code`, `password`, `refresh_token`. At least one; cannot be cleared. |
 | `accessTokenAlg`         | string   | `RS256`, `RS384`, `RS512` or `EdDSA`.                                      |
 | `idTokenAlg`             | string   | `RS256`, `RS384`, `RS512` or `EdDSA`.                                      |
 | `authCodeLifetime`       | int      | Seconds, 10 to 300.                                                        |
@@ -309,9 +309,26 @@ and requires a value for most fields. For every field the spec leaves out, the
 provider sends back what Rauthy currently holds: the defaults Rauthy picked at
 creation, or a value an earlier spec set. Removing a field from the spec
 therefore does not revert it; to change a setting, set it explicitly. Lists are
-compared as sets, so their order does not matter, and an empty list is
-rejected rather than silently ignored. `status.atProvider` shows the client as
-Rauthy reports it.
+compared as sets, so their order does not matter. `status.atProvider` shows
+the client as Rauthy reports it.
+
+**An explicit empty value clears.** To remove a setting, set the list to `[]`
+or the string to `""`:
+
+```yaml
+  forProvider:
+    allowedOrigins: []         # no extra CORS origins
+    restrictGroupPrefix: ""    # no group restriction
+```
+
+The resource reports drift until Rauthy holds no value for the field. Rauthy
+receives `null` for the fields its API marks nullable (`name`,
+`postLogoutRedirectUris`, `allowedOrigins`, `challenges`, `clientUri`,
+`contacts`, `backchannelLogoutUri`, `restrictGroupPrefix`) and `[]` for
+`scopes` and `defaultScopes`, which it requires as lists. `flowsEnabled`
+cannot be empty in Rauthy and keeps `minItems: 1`; `redirectUris` and
+`confidential` are required. Should Rauthy keep a value of its own for a
+cleared field, the resource stays out of sync and names the field.
 
 A new client is created in two steps: the create call carries only the id,
 name, confidentiality and redirect URIs (all Rauthy accepts there), and the
@@ -326,8 +343,6 @@ matches the spec.
   custom claims (with `claims_at_root`). Whatever a client holds for them is
   kept unchanged on every update.
 - Secret rotation.
-- Clearing an optional field or list once set (removing it from the spec keeps
-  the last value, see above).
 - Adopting or importing an existing Rauthy client (by design, see the
   no-adoption rule).
 - Removing `client_secret` from an existing connection Secret when a client

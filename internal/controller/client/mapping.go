@@ -15,7 +15,7 @@ import (
 func createRequest(id string, p *v1alpha1.ClientParameters) rauthy.NewClientRequest {
 	return rauthy.NewClientRequest{
 		ID:                     id,
-		Name:                   p.Name,
+		Name:                   orString(p.Name, nil),
 		Confidential:           p.Confidential,
 		RedirectURIs:           p.RedirectURIs,
 		PostLogoutRedirectURIs: p.PostLogoutRedirectURIs,
@@ -27,11 +27,13 @@ func createRequest(id string, p *v1alpha1.ClientParameters) rauthy.NewClientRequ
 // The body starts as the observed client, every setting included, and the
 // fields the spec sets are laid over it. A field the spec leaves unset, and
 // every setting the spec does not expose (SCIM, allowed resources, default
-// audiences, custom claims), keeps what Rauthy holds.
+// audiences, custom claims), keeps what Rauthy holds. An empty list or string
+// in the spec clears the field: rauthy-go then leaves a nullable field out of
+// the body (null to Rauthy) and sends a required list as [].
 func updateRequest(id string, p *v1alpha1.ClientParameters, obs *rauthy.ClientResponse) rauthy.UpdateClientRequest {
 	req := obs.UpdateRequest()
 	req.ID = id
-	req.Name = orPtr(p.Name, req.Name)
+	req.Name = orString(p.Name, req.Name)
 	req.Confidential = p.Confidential
 	req.RedirectURIs = p.RedirectURIs
 	req.PostLogoutRedirectURIs = orList(p.PostLogoutRedirectURIs, req.PostLogoutRedirectURIs)
@@ -46,15 +48,16 @@ func updateRequest(id string, p *v1alpha1.ClientParameters, obs *rauthy.ClientRe
 	req.DefaultScopes = orList(p.DefaultScopes, req.DefaultScopes)
 	req.Challenges = orList(p.Challenges, req.Challenges)
 	req.ForceMFA = orValue(p.ForceMFA, req.ForceMFA)
-	req.ClientURI = orPtr(p.ClientURI, req.ClientURI)
+	req.ClientURI = orString(p.ClientURI, req.ClientURI)
 	req.Contacts = orList(p.Contacts, req.Contacts)
-	req.BackchannelLogoutURI = orPtr(p.BackchannelLogoutURI, req.BackchannelLogoutURI)
-	req.RestrictGroupPrefix = orPtr(p.RestrictGroupPrefix, req.RestrictGroupPrefix)
+	req.BackchannelLogoutURI = orString(p.BackchannelLogoutURI, req.BackchannelLogoutURI)
+	req.RestrictGroupPrefix = orString(p.RestrictGroupPrefix, req.RestrictGroupPrefix)
 	return req
 }
 
 // differences lists the spec fields whose value Rauthy does not hold. Only
-// fields the spec sets are compared, lists as sets.
+// fields the spec sets are compared, lists as sets; an empty list or string
+// matches only a field Rauthy holds no value for.
 func differences(p *v1alpha1.ClientParameters, obs *rauthy.ClientResponse) []string {
 	var diff []string
 	check := func(field string, equal bool) {
@@ -63,7 +66,7 @@ func differences(p *v1alpha1.ClientParameters, obs *rauthy.ClientResponse) []str
 		}
 	}
 
-	check("name", ptrEqual(p.Name, obs.Name))
+	check("name", stringEqual(p.Name, obs.Name))
 	check("confidential", p.Confidential == obs.Confidential)
 	check("enabled", valueEqual(p.Enabled, obs.Enabled))
 	check("redirectUris", setEqual(p.RedirectURIs, obs.RedirectURIs))
@@ -78,10 +81,10 @@ func differences(p *v1alpha1.ClientParameters, obs *rauthy.ClientResponse) []str
 	check("defaultScopes", listEqual(p.DefaultScopes, obs.DefaultScopes))
 	check("challenges", listEqual(p.Challenges, obs.Challenges))
 	check("forceMfa", valueEqual(p.ForceMFA, obs.ForceMFA))
-	check("clientUri", ptrEqual(p.ClientURI, obs.ClientURI))
+	check("clientUri", stringEqual(p.ClientURI, obs.ClientURI))
 	check("contacts", listEqual(p.Contacts, obs.Contacts))
-	check("backchannelLogoutUri", ptrEqual(p.BackchannelLogoutURI, obs.BackchannelLogoutURI))
-	check("restrictGroupPrefix", ptrEqual(p.RestrictGroupPrefix, obs.RestrictGroupPrefix))
+	check("backchannelLogoutUri", stringEqual(p.BackchannelLogoutURI, obs.BackchannelLogoutURI))
+	check("restrictGroupPrefix", stringEqual(p.RestrictGroupPrefix, obs.RestrictGroupPrefix))
 
 	return diff
 }
@@ -125,11 +128,15 @@ func issuerFor(url string, issuer *string) string {
 	return base + rauthy.APIBasePath
 }
 
-func orPtr[T any](desired, observed *T) *T {
-	if desired != nil {
-		return desired
+// orString resolves an optional string: unset keeps observed, "" clears it.
+func orString(desired, observed *string) *string {
+	switch {
+	case desired == nil:
+		return observed
+	case *desired == "":
+		return nil
 	}
-	return observed
+	return desired
 }
 
 func orValue[T any](desired *T, observed T) T {
@@ -139,28 +146,35 @@ func orValue[T any](desired *T, observed T) T {
 	return observed
 }
 
+// orList resolves an optional list: unset (nil) keeps observed, an empty
+// list clears it.
 func orList(desired, observed []string) []string {
-	if len(desired) > 0 {
+	if desired != nil {
 		return desired
 	}
 	return observed
 }
 
-func ptrEqual[T comparable](desired, observed *T) bool {
+// stringEqual compares an optional string: unset matches anything, "" matches
+// no value.
+func stringEqual(desired, observed *string) bool {
 	if desired == nil {
 		return true
 	}
-	return observed != nil && *desired == *observed
+	if observed == nil {
+		return *desired == ""
+	}
+	return *desired == *observed
 }
 
 func valueEqual[T comparable](desired *T, observed T) bool {
 	return desired == nil || *desired == observed
 }
 
-// listEqual compares an optional list: an unset (empty) desired list matches
-// anything.
+// listEqual compares an optional list: an unset (nil) desired list matches
+// anything, an empty one matches no value.
 func listEqual(desired, observed []string) bool {
-	return len(desired) == 0 || setEqual(desired, observed)
+	return desired == nil || setEqual(desired, observed)
 }
 
 // setEqual compares two lists as sets: Rauthy stores these fields without a
