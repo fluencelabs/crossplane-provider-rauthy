@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
@@ -30,11 +31,11 @@ var ErrAdoption = errors.New("adoption is not supported")
 var (
 	errEmptyID           = errors.New("the client id (the external name) is empty")
 	errInvalidID         = errors.New("invalid client id")
-	errRefused           = errors.New("the create was refused")
 	errNotOwned          = errors.New("refusing to modify a Rauthy client this resource did not create")
 	errIDChanged         = errors.New("the client id is immutable")
 	errCRDLacksOwnership = errors.New(
-		"the installed Client CRD does not keep status.ownership; upgrade the provider's CRDs",
+		"the installed Client CRD does not keep status.ownership; upgrade the provider's CRDs and restart " +
+			"the provider",
 	)
 	errPoliciesNoUpdate = errors.New(
 		"lack Update: the client can only be brought to the spec by an update, so Update (or *) is required",
@@ -54,19 +55,23 @@ type api interface {
 	GetClientSecret(ctx context.Context, id string) (*rauthy.ClientSecretResponse, error)
 }
 
-// external reconciles one Client against Rauthy.
+// external reconciles one Client against Rauthy; see ownership.go for the
+// ownership states it moves between.
 //
 // Create only issues the POST, which carries a handful of fields, and records
-// ownership in status.ownership. Everything else reaches Rauthy through
-// Update, which the reconciler calls on the next pass because the fresh client
-// differs from the spec. A failing PUT is therefore retried as an ordinary
-// update of a client the resource is known to own.
+// ownership. Everything else reaches Rauthy through Update, which the
+// reconciler calls on the next pass because the fresh client differs from the
+// spec. A failing PUT is therefore retried as an ordinary update of a client
+// the resource is known to own.
 type external struct {
 	api    api
 	status kube.SubResourceWriter
 	// reader reads the Client from the API server, bypassing the cache.
 	reader kube.Reader
 	issuer string
+	// crd is set, for the life of the process, once the installed CRD is
+	// found to prune status.ownership.
+	crd *atomic.Bool
 	// confirmed is the client id whose ownership an uncached read confirmed
 	// during this reconcile.
 	confirmed string
@@ -74,21 +79,25 @@ type external struct {
 
 // NewExternal returns the external client for a Rauthy instance. status writes
 // the Client status subresource, where ownership is recorded; reader must read
-// Clients from the API server without a cache, to confirm ownership before
-// acting on it; issuer is published to consumers in the connection details.
+// Clients from the API server without a cache; issuer is published to
+// consumers in the connection details.
 func NewExternal(
 	c *rauthy.Client,
 	status kube.SubResourceWriter,
 	reader kube.Reader,
 	issuer string,
 ) managed.TypedExternalClient[*v1alpha1.Client] {
-	return &external{api: c, status: status, reader: reader, issuer: issuer}
+	return newExternal(c, status, reader, issuer, &atomic.Bool{})
+}
+
+func newExternal(c api, status kube.SubResourceWriter, reader kube.Reader, issuer string, crd *atomic.Bool) *external {
+	return &external{api: c, status: status, reader: reader, issuer: issuer, crd: crd}
 }
 
 // Observe reads the client and decides whether this resource owns it. The
-// cached object only decides cheap refusals; anything that would act as the
-// owner (reporting the client as existing, reading its secret, and the Update
-// and Delete that follow) needs ownership confirmed by an uncached read.
+// cached object only decides cheap refusals; anything that acts as the owner
+// (reporting the client as existing, reading its secret, and the Update and
+// Delete that follow) needs ownership confirmed by an uncached read.
 func (e *external) Observe(ctx context.Context, cr *v1alpha1.Client) (managed.ExternalObservation, error) {
 	id := meta.GetExternalName(cr)
 	if owned := ownedClientID(cr); owned != "" && owned != id {
@@ -97,14 +106,10 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Client) (managed.Ex
 			errIDChanged, owned, id,
 		)
 	}
-	if meta.WasDeleted(cr) && ownedClientID(cr) == "" {
-		// The cache says nothing of ours exists. Confirm before letting the
-		// resource go: a lagging cache must not leak an owned client.
-		if _, ok, err := e.confirmOwnership(ctx, cr, id); err != nil || !ok {
-			return managed.ExternalObservation{ResourceExists: false}, err
-		}
+	if release, err := e.releasable(ctx, cr); err != nil || release {
+		return managed.ExternalObservation{ResourceExists: false}, err
 	}
-	if err := validateClientID(id); err != nil {
+	if err := validateClientID(id); err != nil && !meta.WasDeleted(cr) {
 		return managed.ExternalObservation{}, err
 	}
 	if !meta.WasDeleted(cr) {
@@ -113,25 +118,78 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Client) (managed.Ex
 		}
 	}
 
-	got, err := e.api.GetClient(ctx, id)
-	if rauthy.IsNotFound(err) {
-		return managed.ExternalObservation{ResourceExists: false}, nil
-	}
-	if err != nil {
-		return managed.ExternalObservation{}, fmt.Errorf("cannot get Rauthy client %q: %w", id, err)
-	}
-
-	fresh, ok, err := e.confirmOwnership(ctx, cr, id)
+	got, err := e.lookup(ctx, id)
 	if err != nil {
 		return managed.ExternalObservation{}, err
 	}
-	if !ok {
+	if got == nil {
+		// S3 -> S0: a marker must not outlive its client. Clear it, and only
+		// then let the runtime create again or finalize.
+		if err = e.clearStaleMarker(ctx, cr); err != nil {
+			return managed.ExternalObservation{}, err
+		}
+		return managed.ExternalObservation{ResourceExists: false}, nil
+	}
+
+	owned, err := e.confirmOwnership(ctx, cr, id)
+	if err != nil {
+		return managed.ExternalObservation{}, err
+	}
+	if !owned {
 		if meta.WasDeleted(cr) {
+			// Nothing of ours exists: let the resource go without touching
+			// Rauthy.
 			return managed.ExternalObservation{ResourceExists: false}, nil
 		}
-		return managed.ExternalObservation{}, notOwnedError(fresh, id)
+		return managed.ExternalObservation{}, notOwnedError(id)
 	}
 	return e.observeOwned(ctx, cr, got)
+}
+
+// releasable reports whether a resource being deleted owns nothing, so it can
+// go without touching Rauthy. The cache only gets a cheap no: a lagging cache
+// must not leak an owned client, so its "nothing" is confirmed uncached.
+func (e *external) releasable(ctx context.Context, cr *v1alpha1.Client) (bool, error) {
+	if !meta.WasDeleted(cr) || ownedClientID(cr) != "" {
+		return false, nil
+	}
+	fresh, err := e.readFresh(ctx, cr)
+	if err != nil {
+		return false, err
+	}
+	cr.Status.Ownership = fresh.Status.Ownership
+	return fresh.Status.Ownership == nil, nil
+}
+
+// lookup returns the Rauthy client, or nil when there is none (or the id is
+// one Rauthy could never hold).
+func (e *external) lookup(ctx context.Context, id string) (*rauthy.ClientResponse, error) {
+	if !rauthy.ClientIDPattern().MatchString(id) {
+		return nil, nil //nolint:nilnil // An invalid id names no client: "none" is the answer.
+	}
+	got, err := e.api.GetClient(ctx, id)
+	if rauthy.IsNotFound(err) {
+		return nil, nil //nolint:nilnil // Not found is the "none" answer.
+	}
+	if err != nil {
+		return nil, fmt.Errorf("cannot get Rauthy client %q: %w", id, err)
+	}
+	return got, nil
+}
+
+// clearStaleMarker clears a marker the API server holds while no client
+// exists. The cache may lag either way, so the decision comes from an
+// uncached read.
+func (e *external) clearStaleMarker(ctx context.Context, cr *v1alpha1.Client) error {
+	fresh, err := e.readFresh(ctx, cr)
+	if err != nil {
+		return err
+	}
+	cr.Status.Ownership = fresh.Status.Ownership
+	if fresh.Status.Ownership == nil {
+		return nil
+	}
+	return e.clearOwnership(ctx, cr)
 }
 
 // observeOwned reports a client whose ownership is confirmed.
@@ -166,75 +224,41 @@ func (e *external) observeOwned(
 	}, nil
 }
 
+// Create is only called after Observe found no client and confirmed that the
+// API server holds no marker (S0).
 func (e *external) Create(ctx context.Context, cr *v1alpha1.Client) (managed.ExternalCreation, error) {
 	id := meta.GetExternalName(cr)
 	if err := validateClientID(id); err != nil {
 		return managed.ExternalCreation{}, err
 	}
+	if e.crd.Load() {
+		return managed.ExternalCreation{}, errCRDLacksOwnership
+	}
 	cr.SetConditions(xpv2.Creating())
 
-	// A record of an earlier client (one that has since vanished from Rauthy)
-	// must be gone before the POST: should the id now belong to somebody
-	// else, a stale record would hand their client to this resource.
-	if cr.Status.Ownership != nil {
-		if err := setOwnership(ctx, e.status, cr, ""); err != nil {
-			return managed.ExternalCreation{}, fmt.Errorf("not creating client %q: %w", id, err)
-		}
-	}
-
 	if _, err := e.api.CreateClient(ctx, createRequest(id, &cr.Spec.ForProvider)); err != nil {
-		err = e.createFailed(ctx, id, err)
-		// Persisted by the runtime with its create-failed mark; it only
-		// chooses the wording of later errors.
-		if errors.Is(err, errRefused) {
-			meta.AddAnnotations(cr, map[string]string{AnnotationKeyCreateRefused: id})
-		} else {
-			meta.RemoveAnnotations(cr, AnnotationKeyCreateRefused)
-		}
+		return managed.ExternalCreation{}, e.createFailed(ctx, id, err)
+	}
+	if err := e.recordOwnership(ctx, cr, id); err != nil {
 		return managed.ExternalCreation{}, err
 	}
-
-	if err := setOwnership(ctx, e.status, cr, id); err != nil {
-		cr.Status.Ownership = nil
-		meta.RemoveAnnotations(cr, AnnotationKeyCreateRefused)
-		return managed.ExternalCreation{}, e.unrecorded(ctx, id, err)
-	}
-	meta.RemoveAnnotations(cr, AnnotationKeyCreateRefused)
 	return managed.ExternalCreation{}, nil
 }
 
-// createFailed explains a failed POST. Rauthy's answer to a duplicate id is
-// not a dedicated status code, so the client is looked up: a client that
-// exists after a refused (4xx) POST belongs to somebody else; one that exists
-// after a transport error or a 5xx may be the product of this very request.
-// Neither is ever claimed.
+// createFailed explains a failed POST; the outcome is known only here. A
+// client that exists after a refused (4xx) POST belongs to somebody else; one
+// that exists after a transport error or a 5xx may be the product of this
+// very request. Neither is ever claimed.
 func (e *external) createFailed(ctx context.Context, id string, postErr error) error {
+	ctx, cancel := detached(ctx)
+	defer cancel()
 	if _, getErr := e.api.GetClient(ctx, id); getErr != nil {
 		return fmt.Errorf("cannot create Rauthy client %q: %w", id, postErr)
 	}
 	if isClientError(postErr) {
-		return fmt.Errorf("%w (%w: %w)", adoptionError(id), errRefused, postErr)
+		return refusedError(id, postErr)
 	}
-	return fmt.Errorf("%w (%w)", outcomeUnknownError(id), postErr)
-}
-
-// unrecorded handles a client that was created but whose ownership could not
-// be recorded. Without the record the resource would refuse the client as
-// foreign forever, so the client is deleted again and the next reconcile
-// creates it afresh. If even that fails, a human has to delete it.
-func (e *external) unrecorded(ctx context.Context, id string, recordErr error) error {
-	if err := e.api.DeleteClient(ctx, id); err != nil && !rauthy.IsNotFound(err) {
-		return fmt.Errorf(
-			"created Rauthy client %q but could not record its ownership (%w), and could not delete it again "+
-				"(%w): the resource will refuse it; delete client %q in Rauthy to retry",
-			id, recordErr, err, id,
-		)
-	}
-	return fmt.Errorf(
-		"created Rauthy client %q but could not record its ownership, so it was deleted again and "+
-			"will be recreated: %w",
-		id, recordErr,
-	)
+	return outcomeUnknownError(id, postErr)
 }
 
 func (e *external) Update(ctx context.Context, cr *v1alpha1.Client) (managed.ExternalUpdate, error) {
@@ -279,6 +303,10 @@ func (e *external) Delete(ctx context.Context, cr *v1alpha1.Client) (managed.Ext
 
 	if err = e.api.DeleteClient(ctx, id); err != nil && !rauthy.IsNotFound(err) {
 		return managed.ExternalDelete{}, fmt.Errorf("cannot delete Rauthy client %q: %w", id, err)
+	}
+	// S2 -> S3 -> S0 at once: the marker goes with its client.
+	if err = e.clearOwnership(ctx, cr); err != nil {
+		return managed.ExternalDelete{}, fmt.Errorf("deleted Rauthy client %q: %w", id, err)
 	}
 	return managed.ExternalDelete{}, nil
 }

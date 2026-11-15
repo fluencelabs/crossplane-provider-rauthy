@@ -23,6 +23,18 @@ func TestCreate(t *testing.T) {
 			return errors.New("status write refused")
 		},
 	}
+	// appliedThenFails writes the patch and still reports an error, as when
+	// the answer is lost after the write.
+	appliedThenFails := interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c kube.Client, sub string, obj kube.Object, p kube.Patch,
+			opts ...kube.SubResourcePatchOption,
+		) error {
+			if err := c.SubResource(sub).Patch(ctx, obj, p, opts...); err != nil {
+				return err
+			}
+			return errors.New("timeout after the write")
+		},
+	}
 
 	cases := map[string]struct {
 		reason    string
@@ -31,9 +43,14 @@ func TestCreate(t *testing.T) {
 		failPost  bool
 		failDel   bool
 		intercept *interceptor.Funcs
-		wantErr   error
-		wantErrIs error
-		wantCalls []string
+		// readerFails makes every uncached read fail.
+		readerFails bool
+		// cancelOnPatch cancels the reconcile context inside the status
+		// patch and fails it, as when the deadline is what made it fail.
+		cancelOnPatch bool
+		wantErr       error
+		wantErrIs     error
+		wantCalls     []string
 		// wantOwnedID is the status.ownership the API server holds afterwards.
 		wantOwnedID string
 		wantRemain  bool
@@ -51,14 +68,6 @@ func TestCreate(t *testing.T) {
 			server:     existing(true),
 			wantErrIs:  client.ErrAdoption,
 			wantErr:    errors.New("was not created by this resource"),
-			wantCalls:  []string{"POST /clients", "GET /clients/app"},
-			wantRemain: true,
-		},
-		"ExistingIDDropsStaleOwnership": {
-			reason:     "A re-create clears the record of the vanished client before the POST.",
-			cr:         newClient(owned),
-			server:     existing(true),
-			wantErrIs:  client.ErrAdoption,
 			wantCalls:  []string{"POST /clients", "GET /clients/app"},
 			wantRemain: true,
 		},
@@ -96,12 +105,29 @@ func TestCreate(t *testing.T) {
 			wantCalls:  []string{"POST /clients", "DELETE /clients/app"},
 			wantRemain: true,
 		},
-		"StaleOwnershipNotCleared": {
-			reason:      "If the stale record cannot be cleared, nothing is created.",
-			cr:          newClient(owned),
-			intercept:   &statusFails,
-			wantErr:     errors.New("not creating client"),
+		"RecordAppliedDespiteError": {
+			reason:      "A patch that landed but answered with an error is confirmed by a re-read: created, no rollback.",
+			cr:          newClient(),
+			intercept:   &appliedThenFails,
+			wantCalls:   []string{"POST /clients"},
 			wantOwnedID: testID,
+			wantRemain:  true,
+		},
+		"RecordOutcomeUnknown": {
+			reason:      "If the re-read fails too, the client is neither deleted nor claimed.",
+			cr:          newClient(),
+			intercept:   &statusFails,
+			readerFails: true,
+			wantErr:     errors.New("outcome of recording its ownership is unknown"),
+			wantCalls:   []string{"POST /clients"},
+			wantRemain:  true,
+		},
+		"RollbackSurvivesExpiredContext": {
+			reason:        "The rollback runs on a fresh context when the reconcile's has ended.",
+			cr:            newClient(),
+			cancelOnPatch: true,
+			wantErr:       errors.New("was deleted again and will be recreated"),
+			wantCalls:     []string{"POST /clients", "DELETE /clients/app"},
 		},
 		"InvalidID": {
 			reason:  "An invalid id fails before any request.",
@@ -118,13 +144,12 @@ func TestCreate(t *testing.T) {
 			if tc.server != nil {
 				f.put(tc.server)
 			}
-			k := newKube(t, tc.cr)
-			if tc.intercept != nil {
-				k = interceptor.NewClient(k.(kube.WithWatch), *tc.intercept)
-			}
-			e := client.NewExternal(f.api(t), k.Status(), k, testIssuer)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			base, k, reader := createClients(t, tc.cr, tc.intercept, tc.readerFails, tc.cancelOnPatch, cancel)
+			e := client.NewExternal(f.api(t), k.Status(), reader, testIssuer)
 
-			_, err := e.Create(context.Background(), tc.cr)
+			_, err := e.Create(ctx, tc.cr)
 
 			checkErr(t, tc.reason, err, tc.wantErr, tc.wantErrIs)
 			if diff := cmp.Diff(tc.wantCalls, f.callLog()); diff != "" {
@@ -135,7 +160,7 @@ func TestCreate(t *testing.T) {
 			if got := inMemoryOwnership(tc.cr); got != tc.wantOwnedID {
 				t.Errorf("%s\nstatus.ownership in memory = %q, want %q", tc.reason, got, tc.wantOwnedID)
 			}
-			if got := storedOwnership(t, k, tc.cr); got != tc.wantOwnedID {
+			if got := storedOwnership(t, base, tc.cr); got != tc.wantOwnedID {
 				t.Errorf("%s\nstatus.ownership on the API server = %q, want %q", tc.reason, got, tc.wantOwnedID)
 			}
 			if remains := f.stored() != nil; remains != tc.wantRemain {
@@ -372,4 +397,40 @@ func inMemoryOwnership(cr *v1alpha1.Client) string {
 		return ""
 	}
 	return cr.Status.Ownership.ClientID
+}
+
+// createClients returns the API server's truth, the client the status writes
+// go through and the uncached reader, with the failures a case asks for.
+func createClients(
+	t *testing.T,
+	cr *v1alpha1.Client,
+	intercept *interceptor.Funcs,
+	readerFails, cancelOnPatch bool,
+	cancel context.CancelFunc,
+) (kube.Client, kube.Client, kube.Reader) {
+	t.Helper()
+	base := newKube(t, cr)
+	k := base
+	switch {
+	case cancelOnPatch:
+		k = interceptor.NewClient(base.(kube.WithWatch), interceptor.Funcs{
+			SubResourcePatch: func(context.Context, kube.Client, string, kube.Object, kube.Patch,
+				...kube.SubResourcePatchOption,
+			) error {
+				cancel()
+				return context.Canceled
+			},
+		})
+	case intercept != nil:
+		k = interceptor.NewClient(base.(kube.WithWatch), *intercept)
+	}
+	var reader kube.Reader = base
+	if readerFails {
+		reader = interceptor.NewClient(base.(kube.WithWatch), interceptor.Funcs{
+			Get: func(context.Context, kube.WithWatch, kube.ObjectKey, kube.Object, ...kube.GetOption) error {
+				return errors.New("API server unreachable")
+			},
+		})
+	}
+	return base, k, reader
 }

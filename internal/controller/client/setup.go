@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/controller"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
@@ -108,6 +109,11 @@ type Connector struct {
 	// for a client that has no cache.
 	Reader kube.Reader
 	Usage  UsageTracker
+
+	// crd is shared by every external client of this connector: once the
+	// installed CRD is found to prune status.ownership, no further client is
+	// created until the provider restarts with current CRDs.
+	crd atomic.Bool
 }
 
 // Connect resolves the ClusterProviderConfig, reads the API key and returns a
@@ -151,5 +157,5 @@ func (c *Connector) Connect(
 	if reader == nil {
 		reader = c.Kube
 	}
-	return NewExternal(api, c.Kube.Status(), reader, issuerFor(pc.Spec.URL, pc.Spec.IssuerURL)), nil
+	return newExternal(api, c.Kube.Status(), reader, issuerFor(pc.Spec.URL, pc.Spec.IssuerURL), &c.crd), nil
 }

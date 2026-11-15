@@ -12,6 +12,8 @@ import (
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	"github.com/fluencelabs/rauthy-go"
 	"github.com/google/go-cmp/cmp"
+	kube "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/fluencelabs/crossplane-provider-rauthy/apis/v1alpha1"
 	"github.com/fluencelabs/crossplane-provider-rauthy/internal/controller/client"
@@ -80,36 +82,23 @@ func TestObserve(t *testing.T) {
 			},
 		},
 		"InterruptedCreate": {
-			reason: "A create interrupted before ownership was recorded is refused as an unknown outcome.",
+			reason: "A create interrupted before ownership was recorded is refused with the neutral message.",
 			cr:     newClient(func(cr *v1alpha1.Client) { meta.SetExternalCreatePending(cr, time.Now()) }),
 			server: existing(true),
 			want: want{
-				err:   errors.New("create outcome unknown"),
+				err:   errors.New("if an interrupted create of this resource made it, delete it in Rauthy"),
 				calls: []string{"GET /clients/app"},
 			},
 		},
-		"RefusedCreateOnRecord": {
-			reason: "After Rauthy refused this resource's create, the client is reported as somebody else's.",
-			cr: newClient(func(cr *v1alpha1.Client) {
-				meta.SetExternalCreatePending(cr, time.Now())
-				meta.SetExternalCreateFailed(cr, time.Now())
-				meta.AddAnnotations(cr, map[string]string{client.AnnotationKeyCreateRefused: testID})
-			}),
-			server: existing(true),
-			want: want{
-				err:   errors.New("was not created by this resource"),
-				calls: []string{"GET /clients/app"},
-			},
-		},
-		"AmbiguousCreateOnRecord": {
-			reason: "After an ambiguous create failed, the outcome stays unknown rather than foreign.",
+		"CreateAttemptsOnRecordDoNotChangeWording": {
+			reason: "Create attempts on record (annotations) influence neither behaviour nor wording.",
 			cr: newClient(func(cr *v1alpha1.Client) {
 				meta.SetExternalCreatePending(cr, time.Now())
 				meta.SetExternalCreateFailed(cr, time.Now())
 			}),
 			server: existing(true),
 			want: want{
-				err:   errors.New("create outcome unknown"),
+				err:   errors.New("holds no ownership record for it"),
 				calls: []string{"GET /clients/app"},
 			},
 		},
@@ -318,9 +307,7 @@ func TestStaleCachedOwnershipIsNotTrusted(t *testing.T) {
 	f := newFakeRauthy(t)
 	foreign := existing(true)
 	f.put(foreign)
-	truth := newClient(func(cr *v1alpha1.Client) {
-		meta.AddAnnotations(cr, map[string]string{client.AnnotationKeyCreateRefused: testID})
-	})
+	truth := newClient()
 	k := newKube(t, truth)
 	stale := truth.DeepCopy()
 	owned(stale)
@@ -343,5 +330,93 @@ func TestStaleCachedOwnershipIsNotTrusted(t *testing.T) {
 	}
 	if diff := cmp.Diff(foreign, f.stored()); diff != "" {
 		t.Errorf("the foreign client changed: -want, +got:\n%s", diff)
+	}
+}
+
+// TestObserveClearsMarkerOfMissingClient: a marker must not outlive its
+// client (S3 -> S0). Observe clears it, confirmed, before reporting the
+// client as missing, so a later client with the id can never look owned.
+func TestObserveClearsMarkerOfMissingClient(t *testing.T) {
+	t.Parallel()
+	refuse := interceptor.Funcs{
+		SubResourcePatch: func(context.Context, kube.Client, string, kube.Object, kube.Patch,
+			...kube.SubResourcePatchOption,
+		) error {
+			return errors.New("status write refused")
+		},
+	}
+
+	cases := map[string]struct {
+		reason     string
+		truth      *v1alpha1.Client
+		cached     func(*v1alpha1.Client) *v1alpha1.Client
+		intercept  *interceptor.Funcs
+		wantErr    error
+		wantExists bool
+		wantMarker string
+	}{
+		"MarkerCleared": {
+			reason: "The marker of a vanished client is cleared before Observe reports it missing.",
+			truth:  newClient(owned),
+		},
+		"StaleCacheWithoutMarker": {
+			reason: "A marker the cache does not show yet is still cleared: the decision is uncached.",
+			truth:  newClient(owned),
+			cached: func(cr *v1alpha1.Client) *v1alpha1.Client {
+				cr.Status.Ownership = nil
+				return cr
+			},
+		},
+		"ClearFails": {
+			reason:     "If the marker cannot be cleared, Observe fails instead of letting a create happen.",
+			truth:      newClient(owned),
+			intercept:  &refuse,
+			wantErr:    errors.New("cannot clear status.ownership"),
+			wantMarker: testID,
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeRauthy(t)
+			base := newKube(t, tc.truth)
+			k := base
+			if tc.intercept != nil {
+				k = interceptor.NewClient(base.(kube.WithWatch), *tc.intercept)
+			}
+			cr := tc.truth.DeepCopy()
+			if tc.cached != nil {
+				cr = tc.cached(cr)
+			}
+
+			obs, err := client.NewExternal(f.api(t), k.Status(), base, testIssuer).Observe(context.Background(), cr)
+
+			checkErr(t, tc.reason, err, tc.wantErr, nil)
+			if obs.ResourceExists != tc.wantExists {
+				t.Errorf("%s\nResourceExists = %v, want %v", tc.reason, obs.ResourceExists, tc.wantExists)
+			}
+			if got := storedOwnership(t, base, cr); got != tc.wantMarker {
+				t.Errorf("%s\nstored status.ownership = %q, want %q", tc.reason, got, tc.wantMarker)
+			}
+		})
+	}
+}
+
+func TestDeleteClearsMarker(t *testing.T) {
+	t.Parallel()
+	f := newFakeRauthy(t)
+	f.put(existing(true))
+	cr := newClient(owned, deleting)
+	k := newKube(t, cr)
+
+	if _, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Delete(context.Background(), cr); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if f.stored() != nil {
+		t.Error("the client was not deleted")
+	}
+	if got := storedOwnership(t, k, cr); got != "" {
+		t.Errorf("stored status.ownership = %q after the delete, want none", got)
 	}
 }

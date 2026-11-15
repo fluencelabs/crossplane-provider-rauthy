@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -279,8 +280,8 @@ func TestReconcilerStaleCacheDoesNotAdopt(t *testing.T) {
 	got = h.reconcile(t, 3)
 	h.cache.stale = nil
 
-	if msg := got.GetCondition(xpv2.TypeSynced).Message; !strings.Contains(msg, "was not created by this resource") {
-		t.Errorf("Synced message = %q, want the adoption error", msg)
+	if msg := got.GetCondition(xpv2.TypeSynced).Message; !strings.Contains(msg, "adoption is not supported") {
+		t.Errorf("Synced message = %q, want a refusal", msg)
 	}
 	for _, c := range f.callLog() {
 		if c != "GET /clients/app" {
@@ -345,37 +346,93 @@ func TestReconcilerCRDWithoutOwnership(t *testing.T) {
 	}
 }
 
-// TestReconcilerErrorWordingIsStable: the outcome of an ambiguous create stays
-// "unknown" after the runtime records the failure, and a refused create stays
-// an adoption error.
+// TestReconcilerErrorWordingIsStable: once the create call itself is over,
+// every refusal uses the one neutral message, whatever the create attempt
+// ended in.
 func TestReconcilerErrorWordingIsStable(t *testing.T) {
 	t.Parallel()
 
-	t.Run("Ambiguous", func(t *testing.T) {
-		t.Parallel()
-		f := newFakeRauthy(t)
-		f.commitThenFail = true
-		got := newHarness(t, f, newClient()).reconcile(t, 4)
-		if msg := got.GetCondition(xpv2.TypeSynced).Message; !strings.Contains(msg, "create outcome unknown") {
-			t.Errorf("Synced message = %q, want the create outcome reported as unknown", msg)
-		}
-		if got.Status.Ownership != nil {
-			t.Errorf("status.ownership = %+v, want none", got.Status.Ownership)
-		}
+	for name, setup := range map[string]func(*fakeRauthy){
+		"Ambiguous": func(f *fakeRauthy) { f.commitThenFail = true },
+		"Refused":   func(f *fakeRauthy) { f.raceOnPost = existing(true) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeRauthy(t)
+			setup(f)
+			got := newHarness(t, f, newClient()).reconcile(t, 4)
+			if msg := got.GetCondition(xpv2.TypeSynced).Message; !strings.Contains(msg, "holds no ownership record") {
+				t.Errorf("Synced message = %q, want the neutral refusal", msg)
+			}
+			if got.Status.Ownership != nil {
+				t.Errorf("status.ownership = %+v, want none", got.Status.Ownership)
+			}
+		})
+	}
+}
+
+// TestReconcilerRecordLandedDespiteError: the status patch is applied but
+// answers with an error. The record landed, so the client is kept and
+// managed; deleting it would leave a marker with no client behind it.
+func TestReconcilerRecordLandedDespiteError(t *testing.T) {
+	t.Parallel()
+	f := newFakeRauthy(t)
+	var once atomic.Bool
+	h := newHarness(t, f, newClient(), interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c kube.Client, sub string, obj kube.Object, p kube.Patch,
+			opts ...kube.SubResourcePatchOption,
+		) error {
+			if err := c.SubResource(sub).Patch(ctx, obj, p, opts...); err != nil {
+				return err
+			}
+			if once.CompareAndSwap(false, true) {
+				return errors.New("timeout after the write")
+			}
+			return nil
+		},
 	})
 
-	t.Run("Refused", func(t *testing.T) {
-		t.Parallel()
-		f := newFakeRauthy(t)
-		f.raceOnPost = existing(true)
-		got := newHarness(t, f, newClient()).reconcile(t, 4)
-		if msg := got.GetCondition(
-			xpv2.TypeSynced,
-		).Message; !strings.Contains(
-			msg,
-			"was not created by this resource",
-		) {
-			t.Errorf("Synced message = %q, want the adoption error", msg)
+	got := h.reconcile(t, 5)
+
+	if conditionStatus(got, xpv2.TypeReady) != "True" {
+		t.Errorf("conditions %+v; want Ready", got.Status.Conditions)
+	}
+	if got.Status.Ownership == nil || f.stored() == nil {
+		t.Fatalf("ownership %+v, client %+v; want both", got.Status.Ownership, f.stored())
+	}
+	for _, c := range f.callLog() {
+		if c == "DELETE /clients/app" {
+			t.Error("the client was rolled back although its record landed")
 		}
+	}
+}
+
+// TestReconcilerCRDWithoutOwnershipStopsCreating: once the CRD is found to
+// prune the record, the provider stops creating instead of churning through
+// POST and DELETE on every reconcile.
+func TestReconcilerCRDWithoutOwnershipStopsCreating(t *testing.T) {
+	t.Parallel()
+	f := newFakeRauthy(t)
+	h := newHarness(t, f, newClient(), interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c kube.Client, sub string, obj kube.Object, _ kube.Patch,
+			opts ...kube.SubResourcePatchOption,
+		) error {
+			return c.SubResource(sub).Patch(ctx, obj, kube.RawPatch(types.MergePatchType, []byte("{}")), opts...)
+		},
 	})
+
+	got := h.reconcile(t, 5)
+
+	posts := 0
+	for _, c := range f.callLog() {
+		if c == "POST /clients" {
+			posts++
+		}
+	}
+	if posts != 1 {
+		t.Errorf("%d creates, want 1", posts)
+	}
+	if msg := got.GetCondition(xpv2.TypeSynced).Message; !strings.Contains(msg, "does not keep status.ownership") {
+		t.Errorf("Synced message = %q, want the CRD named", msg)
+	}
 }
