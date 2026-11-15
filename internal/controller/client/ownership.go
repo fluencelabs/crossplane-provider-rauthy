@@ -41,6 +41,8 @@ import (
 //
 //	S0   M absent,  C absent      Observe: not exists -> Create.
 //	S1   M absent,  C present     refused: not ours (or a leaked create of ours).
+//	S4   M = id on another Client refused, whatever C is: neither copy may act
+//	                              as the owner, and none may create the id.
 //	S2   M = id,    C ours        owned: observe, update, delete.
 //	S2'  M = id,    C different   refused: C is not the client M was recorded
 //	                              for (secret differs, or confidentiality
@@ -140,6 +142,10 @@ func (e *external) verifyOwner(
 	if rec == nil {
 		return notOwned, nil, nil
 	}
+	taken, err := e.recordedElsewhere(ctx, fresh, id)
+	if err != nil || taken {
+		return notOwned, nil, err
+	}
 	if !got.Confidential {
 		// A public client has no secret: the binding is the id alone. A
 		// fingerprint means the client was confidential when recorded.
@@ -165,6 +171,29 @@ func (e *external) verifyOwner(
 	}
 	e.confirmed = id
 	return ownedClient, s.Secret, nil
+}
+
+// recordedElsewhere reports whether another Client, in any namespace, records
+// id in its status.ownership. Client ids are global in Rauthy while Clients
+// are namespaced, and a public client's record is bound by the id alone: a
+// record held by two objects cannot tell which of them created the client, so
+// neither may act as its owner, and no Client may create an id another one
+// records. The list is read from the API server, bypassing the cache.
+func (e *external) recordedElsewhere(ctx context.Context, cr *v1alpha1.Client, id string) (bool, error) {
+	ctx, cancel := detached(ctx)
+	defer cancel()
+	all := &v1alpha1.ClientList{}
+	if err := e.reader.List(ctx, all); err != nil {
+		return false, fmt.Errorf("cannot confirm ownership of client %q: cannot list Clients without the cache: %w",
+			id, err)
+	}
+	for i := range all.Items {
+		other := &all.Items[i]
+		if other.GetUID() != cr.GetUID() && ownedClientID(other) == id {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // ensureOwned is verifyOwner for the acting paths, reusing a confirmation
@@ -342,13 +371,15 @@ func validateClientID(id string) error {
 	return nil
 }
 
-// notOwnedError is the one message for an existing client this resource holds
-// no record of, whatever the reason.
+// notOwnedError is the one message for a client id this resource holds no
+// record of that it may act on, whatever the reason: a client with the id
+// exists in Rauthy without a record of this resource, or another Client
+// records the id. It never names the other Client.
 func notOwnedError(id string) error {
 	return fmt.Errorf(
-		"a client with id %q exists in Rauthy and this resource holds no ownership record for it, so it is "+
-			"not managed; if an interrupted create of this resource made it, delete it in Rauthy to retry, "+
-			"otherwise choose another id: %w",
+		"a client with id %q exists in Rauthy or is recorded by another Client, and this resource holds no "+
+			"ownership record for it, so it is not managed; if an interrupted create of this resource made it, "+
+			"delete it in Rauthy to retry, otherwise choose another id: %w",
 		id, ErrAdoption,
 	)
 }

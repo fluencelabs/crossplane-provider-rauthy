@@ -34,13 +34,15 @@ rejected by the API server.
 create.** A `Client` manages exactly the Rauthy client it created itself:
 
 - If a client with the same id already exists in Rauthy and the `Client`
-  holds no ownership record for it, the `Client` reports `a client with id
-  "<id>" exists in Rauthy and this resource holds no ownership record for it,
-  so it is not managed; if an interrupted create of this resource made it,
-  delete it in Rauthy to retry, otherwise choose another id` and does nothing
-  else: it does not mark the resource as existing, does not update the client
-  and does not publish its secret. This one message is used whatever the
-  reason; the provider cannot tell a stranger's client from one its own
+  holds no ownership record for it, or another `Client` in any namespace
+  records the id, the `Client` reports `a client with id "<id>" exists in
+  Rauthy or is recorded by another Client, and this resource holds no
+  ownership record for it, so it is not managed; if an interrupted create of
+  this resource made it, delete it in Rauthy to retry, otherwise choose another
+  id` and does nothing else: it does not create the client, does not mark the
+  resource as existing, does not update the client and does not publish its
+  secret. This one message is used whatever the reason, and it never names the
+  other `Client`; the provider cannot tell a stranger's client from one its own
   interrupted create left behind, so check before deleting anything.
 - Deleting a `Client` deletes only a Rauthy client it created. A `Client` that
   never created anything (for example one stuck on the error above) is deleted
@@ -78,8 +80,18 @@ record was made for.
   by design**: the provider can no longer tell it from a client somebody else
   created with the same id, so it stops managing it (state S2' below).
 - **A public client has no secret.** Its binding is the id alone, so a public
-  client deleted and recreated by someone else with the same id is still
+  client deleted and recreated outside Kubernetes with the same id is still
   taken for the resource's own.
+- **A record must be the only one for its id.** Rauthy client ids are global,
+  while `Client` objects are namespaced. Before acting as the owner, and
+  before creating a client, the provider lists every `Client` in the cluster
+  straight from the API server; if another `Client` (another UID) records the
+  same id, this one is refused. This holds for confidential clients too: two
+  records of one id can only come from a record that outlived its client or
+  from a forged one, and the provider cannot tell which of the two is right.
+  A record left behind by a client deleted out of band therefore blocks other
+  namespaces from creating that id until its own `Client` sees the client
+  gone and clears it, which its next observation does.
 - **`confidential` is immutable** (enforced by the CRD and by the
   controller): switching would change the binding. Delete and recreate the
   `Client` to switch.
@@ -87,7 +99,8 @@ record was made for.
 Before it acts as the owner (reports the client as existing, reads or
 publishes its secret, updates or deletes it), the provider re-reads the
 `Client` straight from the API server, bypassing its cache, requires the
-record there on the same object (same UID), and checks the fingerprint. A
+record there on the same object (same UID), checks that no other `Client`
+records the id, and checks the fingerprint. A
 lagging cache can therefore delay the provider but never make it act on a
 client it does not own.
 
@@ -101,6 +114,7 @@ this resource's client with that id exists in Rauthy.**
 | S2    | id     | ours          | Owned: observed, updated, deleted. |
 | S2'   | id     | not ours      | Refused: the client with the id is not the one the record was made for (another secret, or public where the record has a fingerprint). Never published, updated or deleted. |
 | S3    | id     | none          | Transient: the record is cleared, confirmed, before anything else. |
+| S4    | id on another `Client` too | any | Refused with the message above: never created, published, updated or deleted. Deleting the `Client` finalizes it without touching Rauthy. |
 
 - **Create** (S0): the POST, then the secret is read and the record (id and
   fingerprint) is written in one status patch. If the secret cannot be read,
@@ -133,9 +147,19 @@ Windows that remain:
   recreated by someone else with the same id while the record still exists
   (S3 looking like S2) now lands in S2', because the new client's secret
   differs.
-- **Public clients**: that window stays open; the binding is the id alone.
+- **Public clients across namespaces: closed.** A `Client` in another
+  namespace can no longer create an id another `Client` records, and a
+  `Client` whose record is shared with another never acts on the client, so a
+  record that outlived its client cannot be used to update or delete another
+  namespace's client.
+- **Public clients recreated outside Kubernetes**: that window stays open;
+  the binding is the id alone.
 - **Anyone who can write `clients/status`** can write any record, including
-  a fingerprint (see below).
+  a fingerprint (see below). The single-record check limits what a forged
+  record achieves while the real owner's record exists (both `Client`s are
+  refused, which blocks the owner but does not hand over the client), but it
+  does not stop a forged record for an id no other `Client` records, and once
+  the real owner's `Client` is deleted the forged record is the only one left.
 - **Anyone who knows a client's secret** can compute its fingerprint and, with
   `clients/status` write access, forge a record for it.
 

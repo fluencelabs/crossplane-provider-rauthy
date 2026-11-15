@@ -247,6 +247,12 @@ func (e *external) Create(ctx context.Context, cr *v1alpha1.Client) (managed.Ext
 	if e.crd.Load() {
 		return managed.ExternalCreation{}, errCRDLacksOwnership
 	}
+	if taken, err := e.recordedElsewhere(ctx, cr, id); err != nil || taken {
+		if err == nil {
+			err = notOwnedError(id)
+		}
+		return managed.ExternalCreation{}, err
+	}
 	cr.SetConditions(xpv2.Creating())
 
 	if _, err := e.api.CreateClient(ctx, createRequest(id, &cr.Spec.ForProvider)); err != nil {
