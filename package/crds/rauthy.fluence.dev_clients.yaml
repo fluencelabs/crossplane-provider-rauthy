@@ -1,0 +1,417 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: clients.rauthy.fluence.dev
+spec:
+  group: rauthy.fluence.dev
+  names:
+    categories:
+    - crossplane
+    - managed
+    - rauthy
+    kind: Client
+    listKind: ClientList
+    plural: clients
+    singular: client
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: READY
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Synced')].status
+      name: SYNCED
+      type: string
+    - jsonPath: .metadata.annotations.crossplane\.io/external-name
+      name: EXTERNAL-NAME
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          A Client is an OIDC client in Rauthy. The client id is the external name
+          (the crossplane.io/external-name annotation), which defaults to
+          metadata.name and cannot change once the client exists.
+
+          A Client only ever manages a Rauthy client it created itself: if a client
+          with the same id already exists in Rauthy, the resource reports an error
+          instead of taking it over.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: A ClientSpec defines the desired state of a Client.
+            properties:
+              forProvider:
+                description: |-
+                  ClientParameters are the configurable fields of a Rauthy OIDC client.
+
+                  Optional fields follow one rule: leaving a field unset keeps whatever Rauthy
+                  currently holds for it (the defaults Rauthy picked at creation, or a value a
+                  previous spec set). Removing a field from the spec therefore does not revert
+                  it; set the value explicitly to change it.
+                properties:
+                  accessTokenAlg:
+                    description: AccessTokenAlg is the signing algorithm of access
+                      tokens.
+                    enum:
+                    - RS256
+                    - RS384
+                    - RS512
+                    - EdDSA
+                    type: string
+                  accessTokenLifetime:
+                    description: AccessTokenLifetime is the lifetime of an access
+                      token in seconds.
+                    format: int64
+                    maximum: 86400
+                    minimum: 10
+                    type: integer
+                  allowedOrigins:
+                    description: |-
+                      AllowedOrigins are additional CORS origins, as scheme://host[:port]
+                      without a path.
+                    items:
+                      pattern: ^(http|https)://[a-z0-9.:-]+$
+                      type: string
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                  authCodeLifetime:
+                    description: AuthCodeLifetime is the lifetime of an authorization
+                      code in seconds.
+                    format: int64
+                    maximum: 300
+                    minimum: 10
+                    type: integer
+                  backchannelLogoutUri:
+                    description: |-
+                      BackchannelLogoutURI is the OIDC back-channel logout endpoint of the
+                      application.
+                    pattern: ^[a-zA-Z0-9,.:/_\-&?=~#!$'()*+%@]+$
+                    type: string
+                  challenges:
+                    description: |-
+                      Challenges are the accepted PKCE challenge methods. Rauthy requires S256
+                      from public clients regardless of this setting.
+                    items:
+                      enum:
+                      - plain
+                      - S256
+                      type: string
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                  clientUri:
+                    description: ClientURI is an informational URI of the application.
+                    pattern: ^[a-zA-Z0-9,.:/_\-&?=~#!$'()*+%@]+$
+                    type: string
+                  confidential:
+                    description: |-
+                      Confidential clients authenticate with a secret that Rauthy generates.
+                      A public client has no secret and must use S256 PKCE.
+                    type: boolean
+                  contacts:
+                    description: Contacts of the application's maintainers.
+                    items:
+                      pattern: ^[a-zA-Z0-9+.@/-]{0,48}$
+                      type: string
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                  defaultScopes:
+                    description: DefaultScopes are granted even when the client does
+                      not ask for them.
+                    items:
+                      pattern: ^[a-zA-Z0-9-_/,:*.]{2,64}$
+                      type: string
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                  enabled:
+                    description: Enabled controls whether the client may be used to
+                      log in.
+                    type: boolean
+                  flowsEnabled:
+                    description: FlowsEnabled are the enabled OAuth 2.0 grant types.
+                    items:
+                      enum:
+                      - authorization_code
+                      - client_credentials
+                      - urn:ietf:params:oauth:grant-type:device_code
+                      - password
+                      - refresh_token
+                      type: string
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                  forceMfa:
+                    description: ForceMFA requires MFA from users logging in through
+                      this client.
+                    type: boolean
+                  idTokenAlg:
+                    description: IDTokenAlg is the signing algorithm of id tokens.
+                    enum:
+                    - RS256
+                    - RS384
+                    - RS512
+                    - EdDSA
+                    type: string
+                  name:
+                    description: Name is the human-readable name shown on the login
+                      page.
+                    pattern: ^[a-zA-Z0-9À-ɏ\-\s\x{3041}-\x{3096}\x{30A0}-\x{30FF}\x{3400}-\x{4DB5}\x{4E00}-\x{9FCB}\x{F900}-\x{FA6A}\x{2E80}-\x{2FD5}\x{FF66}-\x{FF9F}\x{FFA1}-\x{FFDC}\x{31F0}-\x{31FF}]{2,128}$
+                    type: string
+                  postLogoutRedirectUris:
+                    description: PostLogoutRedirectURIs are the allowed redirect URIs
+                      after a logout.
+                    items:
+                      pattern: ^[a-zA-Z0-9,.:/_\-&?=~#!$'()*+%@]+$
+                      type: string
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                  redirectUris:
+                    description: RedirectURIs are the allowed redirect URIs. Order
+                      does not matter.
+                    items:
+                      pattern: ^[a-zA-Z0-9,.:/_\-&?=~#!$'()*+%@]+$
+                      type: string
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                  restrictGroupPrefix:
+                    description: |-
+                      RestrictGroupPrefix restricts logins to users in groups starting with
+                      this prefix.
+                    pattern: ^[a-zA-Z0-9-_/,:*\s]{2,64}$
+                    type: string
+                  scopes:
+                    description: Scopes the client may request.
+                    items:
+                      pattern: ^[a-zA-Z0-9-_/,:*.]{2,64}$
+                      type: string
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                required:
+                - confidential
+                - redirectUris
+                type: object
+              managementPolicies:
+                default:
+                - '*'
+                description: |-
+                  THIS IS A BETA FIELD. It is on by default but can be opted out
+                  through a Crossplane feature flag.
+                  ManagementPolicies specify the array of actions Crossplane is allowed to
+                  take on the managed and external resources.
+                  See the design doc for more information: https://github.com/crossplane/crossplane/blob/499895a25d1a1a0ba1604944ef98ac7a1a71f197/design/design-doc-observe-only-resources.md?plain=1#L223
+                  and this one: https://github.com/crossplane/crossplane/blob/444267e84783136daa93568b364a5f01228cacbe/design/one-pager-ignore-changes.md
+                items:
+                  description: |-
+                    A ManagementAction represents an action that the Crossplane controllers
+                    can take on an external resource.
+                  enum:
+                  - Observe
+                  - Create
+                  - Update
+                  - Delete
+                  - LateInitialize
+                  - '*'
+                  type: string
+                type: array
+              providerConfigRef:
+                default:
+                  kind: ClusterProviderConfig
+                  name: default
+                description: |-
+                  ProviderConfigReference specifies how the provider that will be used to
+                  create, observe, update, and delete this managed resource should be
+                  configured.
+                properties:
+                  kind:
+                    description: Kind of the referenced object.
+                    type: string
+                  name:
+                    description: Name of the referenced object.
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+              writeConnectionSecretToRef:
+                description: |-
+                  WriteConnectionSecretToReference specifies the namespace and name of a
+                  Secret to which any connection details for this managed resource should
+                  be written. Connection details frequently include the endpoint, username,
+                  and password required to connect to the managed resource.
+                properties:
+                  name:
+                    description: Name of the secret.
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - forProvider
+            type: object
+            x-kubernetes-validations:
+            - message: 'providerConfigRef.kind must be ClusterProviderConfig: this
+                provider has no namespaced ProviderConfig'
+              rule: '!has(self.providerConfigRef) || self.providerConfigRef.kind ==
+                ''ClusterProviderConfig'''
+          status:
+            description: A ClientStatus represents the observed state of a Client.
+            properties:
+              atProvider:
+                description: ClientObservation is the client as Rauthy reports it.
+                properties:
+                  accessTokenAlg:
+                    type: string
+                  accessTokenLifetime:
+                    format: int64
+                    type: integer
+                  allowedOrigins:
+                    items:
+                      type: string
+                    type: array
+                  authCodeLifetime:
+                    format: int64
+                    type: integer
+                  backchannelLogoutUri:
+                    type: string
+                  challenges:
+                    items:
+                      type: string
+                    type: array
+                  clientUri:
+                    type: string
+                  confidential:
+                    type: boolean
+                  contacts:
+                    items:
+                      type: string
+                    type: array
+                  defaultScopes:
+                    items:
+                      type: string
+                    type: array
+                  enabled:
+                    type: boolean
+                  flowsEnabled:
+                    items:
+                      type: string
+                    type: array
+                  forceMfa:
+                    type: boolean
+                  id:
+                    type: string
+                  idTokenAlg:
+                    type: string
+                  name:
+                    type: string
+                  postLogoutRedirectUris:
+                    items:
+                      type: string
+                    type: array
+                  redirectUris:
+                    items:
+                      type: string
+                    type: array
+                  restrictGroupPrefix:
+                    type: string
+                  scopes:
+                    items:
+                      type: string
+                    type: array
+                type: object
+              conditions:
+                description: Conditions of the resource.
+                items:
+                  description: A Condition that may apply to a resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        LastTransitionTime is the last time this condition transitioned from one
+                        status to another.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        A Message containing details about this condition's last transition from
+                        one status to another, if any.
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        ObservedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: A Reason for this condition's last transition from
+                        one status to another.
+                      type: string
+                    status:
+                      description: Status of this condition; is it currently True,
+                        False, or Unknown?
+                      type: string
+                    type:
+                      description: |-
+                        Type of this condition. At most one of each condition type may apply to
+                        a resource at any point in time.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              lastHandledReconcileAt:
+                description: |-
+                  LastHandledReconcileAt holds the value of the most recent
+                  reconcile-requested-at annotation token that the controller has
+                  processed. Users can compare this to the annotation to determine
+                  whether a reconcile request has been handled.
+                type: string
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the latest metadata.generation
+                  which resulted in either a ready state, or stalled due to error
+                  it can not recover from without human intervention.
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

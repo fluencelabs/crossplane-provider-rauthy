@@ -1,0 +1,177 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: clusterproviderconfigs.rauthy.fluence.dev
+spec:
+  group: rauthy.fluence.dev
+  names:
+    categories:
+    - crossplane
+    - provider
+    - rauthy
+    kind: ClusterProviderConfig
+    listKind: ClusterProviderConfigList
+    plural: clusterproviderconfigs
+    singular: clusterproviderconfig
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.url
+      name: URL
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    - jsonPath: .spec.credentials.secretRef.name
+      name: SECRET-NAME
+      priority: 1
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          A ClusterProviderConfig configures the Rauthy provider. It is cluster scoped
+          on purpose: the API key lives in one Secret in the provider's namespace and
+          application namespaces only reference the config by name. There is no
+          namespaced ProviderConfig.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ClusterProviderConfigSpec configures how the provider reaches
+              Rauthy.
+            properties:
+              credentials:
+                description: Credentials used to authenticate to the Rauthy admin
+                  API.
+                properties:
+                  secretRef:
+                    description: |-
+                      SecretRef selects the key of a Secret holding the Rauthy API key in the
+                      form `name$secret`, exactly as Rauthy displays it on creation. Keep the
+                      Secret in the provider's own namespace.
+                    properties:
+                      key:
+                        description: The key to select.
+                        type: string
+                      name:
+                        description: Name of the secret.
+                        type: string
+                      namespace:
+                        description: Namespace of the secret.
+                        type: string
+                    required:
+                    - key
+                    - name
+                    - namespace
+                    type: object
+                  source:
+                    default: Secret
+                    description: Source of the credentials. Only a Kubernetes Secret
+                      is supported.
+                    enum:
+                    - Secret
+                    type: string
+                required:
+                - secretRef
+                - source
+                type: object
+              issuerURL:
+                description: |-
+                  IssuerURL is the OIDC issuer published to consumers in the connection
+                  details of every Client. Defaults to URL followed by /auth/v1, which is
+                  only right when consumers reach Rauthy at the same address as the
+                  provider; set it to the public issuer otherwise.
+                pattern: ^https?://
+                type: string
+              url:
+                description: |-
+                  URL is the Rauthy base URL the provider talks to, for example
+                  http://rauthy.rauthy.svc.cluster.local:8080. The API path /auth/v1 is
+                  appended automatically.
+                pattern: ^https?://
+                type: string
+            required:
+            - credentials
+            - url
+            type: object
+          status:
+            description: A ProviderConfigStatus reflects the observed state of a provider
+              config.
+            properties:
+              conditions:
+                description: Conditions of the resource.
+                items:
+                  description: A Condition that may apply to a resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        LastTransitionTime is the last time this condition transitioned from one
+                        status to another.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        A Message containing details about this condition's last transition from
+                        one status to another, if any.
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        ObservedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: A Reason for this condition's last transition from
+                        one status to another.
+                      type: string
+                    status:
+                      description: Status of this condition; is it currently True,
+                        False, or Unknown?
+                      type: string
+                    type:
+                      description: |-
+                        Type of this condition. At most one of each condition type may apply to
+                        a resource at any point in time.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              users:
+                description: Users of this provider configuration.
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
