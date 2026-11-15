@@ -6,7 +6,7 @@ require (
 	github.com/alecthomas/kingpin/v2 v2.4.0
 	github.com/crossplane/crossplane-runtime/v2 v2.4.3
 	github.com/crossplane/crossplane/apis/v2 v2.4.3
-	github.com/fluencelabs/rauthy-go v0.0.0-20261115114616-4d5d305113ae
+	github.com/fluencelabs/rauthy-go v0.1.0
 	github.com/go-logr/logr v1.4.4
 	github.com/google/go-cmp v0.7.0
 	google.golang.org/grpc v1.85.0

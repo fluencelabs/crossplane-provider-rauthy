@@ -39,8 +39,13 @@ type fakeRauthy struct {
 	// raceOnPost, when set, is stored under the requested id just before the
 	// next POST is handled: a third party taking the id first.
 	raceOnPost *rauthy.ClientResponse
-	authz      string
-	srv        *httptest.Server
+	// redirectTo, when set, answers every API request with a 308 to it, as a
+	// proxy in front of Rauthy might.
+	redirectTo string
+	// lastPut is the body of the last PUT /clients/{id}.
+	lastPut *rauthy.UpdateClientRequest
+	authz   string
+	srv     *httptest.Server
 }
 
 func newFakeRauthy(t *testing.T) *fakeRauthy {
@@ -120,6 +125,13 @@ func (f *fakeRauthy) resetCalls() {
 	f.calls = nil
 }
 
+// lastPutBody returns the body of the last PUT, or nil.
+func (f *fakeRauthy) lastPutBody() *rauthy.UpdateClientRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastPut
+}
+
 func (f *fakeRauthy) lastAuthorization() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -139,6 +151,10 @@ func (f *fakeRauthy) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	f.calls = append(f.calls, r.Method+" "+path)
 	f.authz = r.Header.Get("Authorization")
+	if f.redirectTo != "" {
+		http.Redirect(w, r, f.redirectTo+r.URL.Path, http.StatusPermanentRedirect)
+		return
+	}
 
 	rest, isClients := strings.CutPrefix(path, "/clients")
 	switch {
@@ -238,6 +254,7 @@ func (f *fakeRauthy) update(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	f.lastPut = &req
 	// Rauthy refuses a PUT without these; an empty value means the caller
 	// forgot to fill an unset field from the observed client.
 	if len(req.FlowsEnabled) == 0 || req.AccessTokenAlg == "" || req.AuthCodeLifetime == 0 {
@@ -266,6 +283,10 @@ func (f *fakeRauthy) update(w http.ResponseWriter, r *http.Request, id string) {
 		BackchannelLogoutURI:   req.BackchannelLogoutURI,
 		RestrictGroupPrefix:    req.RestrictGroupPrefix,
 		Scim:                   req.Scim,
+		AllowedResources:       req.AllowedResources,
+		DefaultAud:             req.DefaultAud,
+		Claims:                 req.Claims,
+		ClaimsAtRoot:           req.ClaimsAtRoot,
 	}
 	f.clients[id] = c
 	writeJSON(w, c)

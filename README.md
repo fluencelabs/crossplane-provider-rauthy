@@ -227,7 +227,9 @@ spec:
 ```
 
 `url` is where the provider reaches Rauthy; `/auth/v1` is appended
-automatically. `issuerURL` is the issuer published to consumers; it defaults to
+automatically. It must not carry a query or fragment, and the provider does not
+follow redirects: a `url` that answers 3xx fails with a message naming where it
+pointed. `issuerURL` is the issuer published to consumers; it defaults to
 `url` followed by `/auth/v1`, which is only right when consumers reach Rauthy at
 the same address as the provider.
 
@@ -273,8 +275,9 @@ ownership record, and never logged.
 
 ## Field reference
 
-`spec.forProvider` mirrors the Rauthy client one to one. Only `confidential`
-and `redirectUris` are required.
+`spec.forProvider` mirrors the Rauthy client field by field, except for the
+settings listed under "Not yet supported". Only `confidential` and
+`redirectUris` are required.
 
 | Field                    | Type     | Notes                                                                      |
 | ------------------------ | -------- | -------------------------------------------------------------------------- |
@@ -319,8 +322,9 @@ matches the spec.
 
 ## Not yet supported
 
-- SCIM configuration. An existing SCIM setting on a client is passed through
-  unchanged on every update.
+- SCIM configuration, allowed resources (RFC 8707), default audiences and
+  custom claims (with `claims_at_root`). Whatever a client holds for them is
+  kept unchanged on every update.
 - Secret rotation.
 - Clearing an optional field or list once set (removing it from the spec keeps
   the last value, see above).
