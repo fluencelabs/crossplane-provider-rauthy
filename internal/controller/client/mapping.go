@@ -24,33 +24,33 @@ func createRequest(id string, p *v1alpha1.ClientParameters) rauthy.NewClientRequ
 
 // updateRequest renders the body of PUT /clients/{id}, a full replacement.
 //
-// Every field the spec sets comes from the spec; every field it leaves unset
-// comes from the observed client, so an unset field keeps what Rauthy holds.
-// SCIM is not managed by this provider and is passed through unchanged.
+// The body starts as the observed client, every setting included, and the
+// fields the spec sets are laid over it. A field the spec leaves unset, and
+// every setting the spec does not expose (SCIM, allowed resources, default
+// audiences, custom claims), keeps what Rauthy holds.
 func updateRequest(id string, p *v1alpha1.ClientParameters, obs *rauthy.ClientResponse) rauthy.UpdateClientRequest {
-	return rauthy.UpdateClientRequest{
-		ID:                     id,
-		Name:                   orPtr(p.Name, obs.Name),
-		Confidential:           p.Confidential,
-		RedirectURIs:           p.RedirectURIs,
-		PostLogoutRedirectURIs: orList(p.PostLogoutRedirectURIs, obs.PostLogoutRedirectURIs),
-		AllowedOrigins:         orList(p.AllowedOrigins, obs.AllowedOrigins),
-		Enabled:                orValue(p.Enabled, obs.Enabled),
-		FlowsEnabled:           orList(p.FlowsEnabled, obs.FlowsEnabled),
-		AccessTokenAlg:         orValue(p.AccessTokenAlg, obs.AccessTokenAlg),
-		IDTokenAlg:             orValue(p.IDTokenAlg, obs.IDTokenAlg),
-		AuthCodeLifetime:       orValue(p.AuthCodeLifetime, obs.AuthCodeLifetime),
-		AccessTokenLifetime:    orValue(p.AccessTokenLifetime, obs.AccessTokenLifetime),
-		Scopes:                 orList(p.Scopes, obs.Scopes),
-		DefaultScopes:          orList(p.DefaultScopes, obs.DefaultScopes),
-		Challenges:             orList(p.Challenges, obs.Challenges),
-		ForceMFA:               orValue(p.ForceMFA, obs.ForceMFA),
-		ClientURI:              orPtr(p.ClientURI, obs.ClientURI),
-		Contacts:               orList(p.Contacts, obs.Contacts),
-		BackchannelLogoutURI:   orPtr(p.BackchannelLogoutURI, obs.BackchannelLogoutURI),
-		RestrictGroupPrefix:    orPtr(p.RestrictGroupPrefix, obs.RestrictGroupPrefix),
-		Scim:                   obs.Scim,
-	}
+	req := obs.UpdateRequest()
+	req.ID = id
+	req.Name = orPtr(p.Name, req.Name)
+	req.Confidential = p.Confidential
+	req.RedirectURIs = p.RedirectURIs
+	req.PostLogoutRedirectURIs = orList(p.PostLogoutRedirectURIs, req.PostLogoutRedirectURIs)
+	req.AllowedOrigins = orList(p.AllowedOrigins, req.AllowedOrigins)
+	req.Enabled = orValue(p.Enabled, req.Enabled)
+	req.FlowsEnabled = orList(p.FlowsEnabled, req.FlowsEnabled)
+	req.AccessTokenAlg = orValue(p.AccessTokenAlg, req.AccessTokenAlg)
+	req.IDTokenAlg = orValue(p.IDTokenAlg, req.IDTokenAlg)
+	req.AuthCodeLifetime = orValue(p.AuthCodeLifetime, req.AuthCodeLifetime)
+	req.AccessTokenLifetime = orValue(p.AccessTokenLifetime, req.AccessTokenLifetime)
+	req.Scopes = orList(p.Scopes, req.Scopes)
+	req.DefaultScopes = orList(p.DefaultScopes, req.DefaultScopes)
+	req.Challenges = orList(p.Challenges, req.Challenges)
+	req.ForceMFA = orValue(p.ForceMFA, req.ForceMFA)
+	req.ClientURI = orPtr(p.ClientURI, req.ClientURI)
+	req.Contacts = orList(p.Contacts, req.Contacts)
+	req.BackchannelLogoutURI = orPtr(p.BackchannelLogoutURI, req.BackchannelLogoutURI)
+	req.RestrictGroupPrefix = orPtr(p.RestrictGroupPrefix, req.RestrictGroupPrefix)
+	return req
 }
 
 // differences lists the spec fields whose value Rauthy does not hold. Only
