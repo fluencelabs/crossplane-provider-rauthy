@@ -38,36 +38,72 @@ create.** A `Client` manages exactly the Rauthy client it created itself:
   adoption is not supported` and does nothing else: it does not mark the
   resource as existing, does not update the client and does not publish its
   secret. This holds whether the existing client is found while observing or
-  when the create request is refused.
+  when Rauthy refuses the create request.
 - Deleting a `Client` deletes only a Rauthy client it created. A `Client` that
   never created anything (for example one stuck on the error above) is deleted
   without touching Rauthy.
-- Management policies that cannot create, such as `["Observe"]`, would only
-  ever observe a client created elsewhere, which is an import. They are refused
-  with the same error until the resource has created its own client. A
-  resource that did create its client may switch to such policies later.
+- Management policies must include `Update` (or `*`): a new client only gets
+  most of its configuration through an update, so without it the client could
+  never match the spec. Until the resource has created its client they must
+  also include `Create`; without it the resource could only observe a client
+  created elsewhere, which is an import. Other policy sets are refused with an
+  error naming the missing action. Policies are not checked while a `Client`
+  is being deleted.
 - The client id is fixed once the client exists. Changing the external name of
   a `Client` that owns a Rauthy client is reported as an error rather than
   pointing the resource at a different client.
 
-Ownership is recorded on the `Client` itself: the runtime's
-`crossplane.io/external-create-succeeded` annotation, newer than any later
-create attempt, together with `rauthy.fluence.dev/created-client-id`, which the
-provider writes in the same update. Copying these annotations onto another
-resource transfers ownership, so treat them as part of the resource.
+### What counts as ownership
 
-Two situations need a human:
+The only evidence is `status.ownership` (`clientID` and `createdAt`) on the
+`Client`. The provider writes it through the status subresource immediately
+after Rauthy accepts the create, and clears it before creating again. A
+`Client` owns a Rauthy client exactly when `status.ownership.clientID` equals
+its external name. Annotations, including Crossplane's
+`crossplane.io/external-create-*` marks, grant nothing.
 
-- **Interrupted create.** If the provider stops after Rauthy accepted the
-  create but before the result was recorded, crossplane-runtime refuses to
-  continue (`cannot determine creation result`). The provider cannot prove the
-  client is its own, so it does not guess: check the client in Rauthy, delete
-  it there if it is the one this resource made, and remove the
-  `crossplane.io/external-create-pending` annotation.
-- **A client deleted out of band and recreated by someone else with the same
-  id.** Rauthy keeps no record of who created a client, so a resource that once
-  created a client cannot tell it apart from a stranger's client with the same
-  id that appeared later. Avoid reusing client ids across owners.
+The API server ignores `status` when a `Client` is created or updated through
+the main resource, so a manifest cannot carry ownership. What it does rely on:
+
+- **Only the provider may write `clients/status`.** Anyone with write access to
+  the `clients/status` subresource of `rauthy.fluence.dev` can forge ownership
+  and so take over any Rauthy client, including its secret. Do not grant that
+  permission to anyone but the provider's service account. Crossplane's RBAC
+  manager can aggregate rules for provider resources into the built-in roles,
+  so check who holds it, for example with `kubectl auth can-i patch
+  clients.rauthy.fluence.dev --subresource=status -n NAMESPACE --as=USER`.
+- **Tenants should not create `Client` objects directly** if a platform
+  composes them. Ownership protects existing Rauthy clients, but a tenant who
+  can create a `Client` can still create new Rauthy clients with any id that is
+  free and any redirect URIs.
+- **Status is not backed up reliably.** Restoring a `Client` from a backup or
+  re-applying it from Git recreates it without `status.ownership`. The resource
+  then fails safe: it refuses its own client as foreign. To recover, either
+  delete the client in Rauthy, after which the resource creates it again (with
+  a new secret), or delete the `Client` (which leaves the Rauthy client alone)
+  and remove the client in Rauthy by hand.
+
+### When a create goes wrong
+
+- **Rauthy refuses the create** (a 4xx answer) and a client with that id
+  exists: the id belongs to somebody else, and the adoption error above is
+  reported.
+- **The create request fails ambiguously** (a timeout, a transport error or a
+  5xx answer) and a client with that id exists afterwards: the create may have
+  gone through, but that cannot be proven. The resource reports `create outcome
+  unknown: the request failed but a client with id "<id>" now exists; verify
+  and delete it in Rauthy to retry` and does not claim the client. The same
+  error appears when the provider stopped between the create and recording
+  ownership. Check the client in Rauthy and delete it if it is not in use;
+  the resource then creates it afresh.
+- **Recording ownership fails** after Rauthy accepted the create: the provider
+  deletes the new client again and retries on the next reconcile. If that
+  deletion fails too, the error names the client to delete in Rauthy by hand.
+
+Rauthy itself keeps no record of who created a client. One gap remains: if an
+owned client is deleted in Rauthy out of band and somebody else creates a
+client with the same id before the provider next looks, the provider cannot
+tell it from its own and manages it. Avoid reusing client ids across owners.
 
 ## Install
 
@@ -79,6 +115,11 @@ metadata:
 spec:
   package: ghcr.io/fluencelabs/crossplane-provider-rauthy:v0.1.0
 ```
+
+The package is pulled from GitHub Container Registry: either make the
+`crossplane-provider-rauthy` package public in the organisation's package
+settings, or give the `Provider` a pull secret with
+`spec.packagePullSecrets`.
 
 Create an API key in the Rauthy Admin UI (API Keys) with the `Clients` rights
 (create, read, update, delete) and `Secrets: read`, store it in the provider's
@@ -228,7 +269,10 @@ Requires Go (the version in `go.mod`), Docker for images, and the
 
 The unit tests run the external client against an in-memory fake of the Rauthy
 API that behaves like the real server where it matters (the create call drops
-everything but the create fields, updates replace the whole client).
+everything but the create fields, updates replace the whole client). A second
+set of tests drives crossplane-runtime's real managed reconciler against a fake
+API server, to check that ownership recorded in status survives the runtime's
+own updates of the object.
 
 The upstream provider template's `build` submodule is not used; the plain
 `Makefile` above covers what this provider needs.
