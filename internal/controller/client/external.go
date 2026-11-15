@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
@@ -73,6 +74,8 @@ type external struct {
 	status kube.SubResourceWriter
 	// reader reads the Client from the API server, bypassing the cache.
 	reader kube.Reader
+	// log is the provider's own log, never shown on the resource.
+	log logging.Logger
 	// cache looks Clients up by ClientIDIndex; nil sends those lookups to
 	// reader.
 	cache  kube.Reader
@@ -105,7 +108,10 @@ func newExternal(
 	issuer string,
 	crd *atomic.Bool,
 ) *external {
-	return &external{api: c, status: status, reader: reader, cache: cache, issuer: issuer, crd: crd}
+	return &external{
+		api: c, status: status, reader: reader, cache: cache, issuer: issuer, crd: crd,
+		log: logging.NewNopLogger(),
+	}
 }
 
 // Observe reads the client and decides whether this resource owns it. The

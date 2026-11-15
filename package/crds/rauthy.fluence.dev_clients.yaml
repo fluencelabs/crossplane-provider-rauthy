@@ -28,6 +28,9 @@ spec:
     - jsonPath: .metadata.annotations.crossplane\.io/external-name
       name: EXTERNAL-NAME
       type: string
+    - jsonPath: .status.ownership.clientID
+      name: RECORDED-ID
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: AGE
       type: date

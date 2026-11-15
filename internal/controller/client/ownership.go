@@ -208,7 +208,7 @@ func (e *external) recordedElsewhere(ctx context.Context, cr *v1alpha1.Client, i
 		return false, fmt.Errorf("cannot confirm ownership of client %q: cannot list Clients without the cache: %w",
 			id, err)
 	}
-	return otherRecord(all.Items, cr, id) != nil, nil
+	return e.refusedFor(cr, otherRecord(all.Items, cr, id), id), nil
 }
 
 // recordedElsewhereCached is recordedElsewhere answered from the cache,
@@ -224,7 +224,23 @@ func (e *external) recordedElsewhereCached(ctx context.Context, cr *v1alpha1.Cli
 	if err := e.cache.List(ctx, same, kube.MatchingFields{ClientIDIndex: id}); err != nil {
 		return false, fmt.Errorf("cannot confirm ownership of client %q: cannot look up other records: %w", id, err)
 	}
-	return otherRecord(same.Items, cr, id) != nil, nil
+	return e.refusedFor(cr, otherRecord(same.Items, cr, id), id), nil
+}
+
+// refusedFor reports whether other blocks cr and, if so, names other in the
+// provider's log so that an operator can find the holder. The resource's
+// conditions and events never name it: a tenant must not learn another
+// namespace's objects from a refusal.
+func (e *external) refusedFor(cr, other *v1alpha1.Client, id string) bool {
+	if other == nil {
+		return false
+	}
+	e.log.Info("Refusing a client id another Client records",
+		"client-id", id,
+		"refused", kube.ObjectKeyFromObject(cr).String(),
+		"recorded-by", kube.ObjectKeyFromObject(other).String(),
+	)
+	return true
 }
 
 // otherRecord returns a Client among items, other than cr, that records id.

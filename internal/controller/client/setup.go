@@ -12,6 +12,7 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/controller"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/feature"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/ratelimiter"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
@@ -47,12 +48,14 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 		return fmt.Errorf("cannot index Clients by recorded client id: %w", err)
 	}
 
+	log := o.Logger.WithValues("controller", name)
 	opts := append(ReconcilerOptions(&Connector{
 		Kube:   mgr.GetClient(),
 		Reader: mgr.GetAPIReader(),
 		Usage:  resource.NewProviderConfigUsageTracker(mgr.GetClient(), &v1alpha1.ProviderConfigUsage{}),
+		Logger: log,
 	}),
-		managed.WithLogger(o.Logger.WithValues("controller", name)),
+		managed.WithLogger(log),
 		managed.WithPollInterval(o.PollInterval),
 		//nolint:staticcheck // crossplane-runtime has not moved to the new events API yet.
 		managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))),
@@ -116,6 +119,9 @@ type Connector struct {
 	// is set, Kube must index Clients by ClientIDIndex.
 	Reader kube.Reader
 	Usage  UsageTracker
+	// Logger receives what only the provider's operator may see, such as
+	// which Client holds a record that blocks another one. Nil discards it.
+	Logger logging.Logger
 
 	// crd is shared by every external client of this connector: once the
 	// installed CRD is found to prune status.ownership, no further client is
@@ -162,7 +168,11 @@ func (c *Connector) Connect(
 	if err != nil {
 		return nil, fmt.Errorf("cannot build the Rauthy client: %w", err)
 	}
-	return newExternal(api, c.Kube.Status(), reader, cache, issuerFor(pc.Spec.URL, pc.Spec.IssuerURL), &c.crd), nil
+	e := newExternal(api, c.Kube.Status(), reader, cache, issuerFor(pc.Spec.URL, pc.Spec.IssuerURL), &c.crd)
+	if c.Logger != nil {
+		e.log = c.Logger
+	}
+	return e, nil
 }
 
 // readAPIKey reads the API key from its Secret through r, which must not be

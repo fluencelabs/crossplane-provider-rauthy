@@ -94,7 +94,20 @@ record was made for.
   from a forged one, and the provider cannot tell which of the two is right.
   A record left behind by a client deleted out of band therefore blocks other
   namespaces from creating that id until its own `Client` sees the client
-  gone and clears it, which its next observation does.
+  gone and clears it. Its next successful observation does that, but only if
+  it gets one: a `Client` that is paused, whose provider config or API key is
+  broken, or whose management policies are refused never observes, and its
+  record keeps the id blocked indefinitely. The refusal message never names the
+  holder; an operator finds it with `kubectl get clients -A` (the `RECORDED-ID`
+  column shows `status.ownership.clientID`) or in the provider's log, which
+  names both objects (`Refusing a client id another Client records`, with
+  `recorded-by` set to the holder). To unblock the id, make the holder
+  reconcile again (unpause it, fix its provider config or management
+  policies): it then clears the stale record. Deleting the holder only helps
+  once it can reconcile, since its finalizer is removed by the provider. As a
+  last resort, an operator allowed to write `clients/status` can remove
+  `status.ownership` from the holder; that is safe only after checking that
+  no client with that id exists in Rauthy.
 - **`confidential` is immutable** (enforced by the CRD and by the
   controller): switching would change the binding. Delete and recreate the
   `Client` to switch.

@@ -221,3 +221,33 @@ func checkTwoRecords(t *testing.T, confidential bool) {
 		t.Errorf("Rauthy client = %+v, want it untouched", c)
 	}
 }
+
+// TestRefusalNamesHolderOnlyInProviderLog: the operator can find the Client
+// that holds a blocking record from the provider's log, while the refused
+// resource's conditions and events never name it.
+func TestRefusalNamesHolderOnlyInProviderLog(t *testing.T) {
+	t.Parallel()
+	f := newFakeRauthy(t)
+	a, b := twoTenants(t, f, noop, noop)
+	if got := a.reconcile(t, 5); readyStatus(got) != "True" {
+		t.Fatalf("A Ready = %q, conditions %+v", readyStatus(got), got.Status.Conditions)
+	}
+	f.deleteStored()
+
+	gotB := b.reconcile(t, 2)
+	checkNeutral(t, gotB, tenantA)
+	for {
+		select {
+		case e := <-b.events.Events:
+			if strings.Contains(e, tenantA) {
+				t.Errorf("event %q names the other Client", e)
+			}
+			continue
+		default:
+		}
+		break
+	}
+	if log := b.provider.all(); !strings.Contains(log, tenantA+"/"+testID) {
+		t.Errorf("provider log does not name the Client holding the record:\n%s", log)
+	}
+}

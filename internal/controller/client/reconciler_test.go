@@ -62,6 +62,9 @@ type harness struct {
 	key   kube.ObjectKey
 	// uncached counts the reads that bypass the cache.
 	uncached *countingReader
+	// provider captures what the external client logs on the provider side
+	// only.
+	provider *logSink
 	// events and logs capture what the reconciler tells the world.
 	events *record.FakeRecorder
 	logs   *logSink
@@ -149,10 +152,12 @@ func newHarness(t *testing.T, f *fakeRauthy, cr *v1alpha1.Client, intercept ...i
 	k := b.Build()
 	cache := &staleCache{Client: k}
 	uncached := &countingReader{Reader: k}
+	provider := &logSink{}
 
 	c := &client.Connector{
 		Kube:   cache,
 		Reader: uncached,
+		Logger: logging.NewLogrLogger(funcr.New(provider.add, funcr.Options{})),
 		Usage:  resource.NewProviderConfigUsageTracker(cache, &v1alpha1.ProviderConfigUsage{}),
 	}
 	events := record.NewFakeRecorder(1000)
@@ -166,7 +171,7 @@ func newHarness(t *testing.T, f *fakeRauthy, cr *v1alpha1.Client, intercept ...i
 		resource.ManagedKind(v1alpha1.ClientGroupVersionKind), opts...)
 	return &harness{
 		kube: k, cache: cache, r: r, key: kube.ObjectKeyFromObject(cr), events: events, logs: logs,
-		uncached: uncached,
+		uncached: uncached, provider: provider,
 	}
 }
 
