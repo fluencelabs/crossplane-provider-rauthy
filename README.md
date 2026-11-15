@@ -102,9 +102,12 @@ record was made for.
   column shows `status.ownership.clientID`) or in the provider's log, which
   names both objects (`Refusing a client id another Client records`, with
   `recorded-by` set to the holder). To unblock the id, make the holder
-  reconcile again (unpause it, fix its provider config or management
-  policies): it then clears the stale record. Deleting the holder only helps
-  once it can reconcile, since its finalizer is removed by the provider. As a
+  reconcile again (unpause it, fix its provider config or API key, fix its
+  management policies): it then clears the stale record. Deleting the holder
+  also clears it, since management policies are not checked while a `Client`
+  is being deleted, except for a holder that is paused or whose provider
+  config or API key is broken: its finalizer is removed by the provider, so
+  such a holder stays until it can reconcile again. As a
   last resort, an operator allowed to write `clients/status` can remove
   `status.ownership` from the holder; that is safe only after checking that
   no client with that id exists in Rauthy.
@@ -117,10 +120,15 @@ publishes its secret, updates or deletes it), the provider re-reads the
 `Client` straight from the API server, bypassing its cache, requires the
 record there on the same object (same UID), checks that no other `Client`
 records the id (in the cache, and uncached again before a delete), and checks
-the fingerprint. A lagging cache can therefore delay the provider but never
-make it create or delete a client it does not own; an update of a client
-whose id another `Client` recorded within the cache's lag is the one action
-that check can come too late for.
+the fingerprint. The other-record check of an observation is answered from
+the cache, so a record another `Client` wrote within the cache's lag can be
+missed there, and everything that observation decides as the owner rests on
+it: publishing the connection details (including a confidential client's
+secret), reporting the client as existing and `Ready`, and the update that
+follows. Create and Delete do not rest on it: right before the create call
+and the delete call the check is repeated uncached, so a lagging cache never
+makes the provider create or delete a client whose id another `Client`
+records.
 
 The provider keeps one invariant: **a record names a client id only while
 this resource's client with that id exists in Rauthy.**

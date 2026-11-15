@@ -212,10 +212,12 @@ func (e *external) recordedElsewhere(ctx context.Context, cr *v1alpha1.Client, i
 }
 
 // recordedElsewhereCached is recordedElsewhere answered from the cache,
-// through the ClientIDIndex, for the paths that run on every poll (Observe,
-// and Update after it). It can miss a record written within the cache's lag;
-// nothing destructive or creating relies on it alone, since Create and Delete
-// repeat the check uncached.
+// through the ClientIDIndex, for the paths that run on every poll. It can miss
+// a record written within the cache's lag, and everything Observe decides as
+// the owner rests on it: publishing the connection details (a confidential
+// client's secret included), reporting the client as existing and Ready, and
+// the Update that follows. Create and Delete do not: they repeat the check
+// uncached right before the POST and the DELETE.
 func (e *external) recordedElsewhereCached(ctx context.Context, cr *v1alpha1.Client, id string) (bool, error) {
 	if e.cache == nil {
 		return e.recordedElsewhere(ctx, cr, id)
