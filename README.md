@@ -58,19 +58,38 @@ create.** A `Client` manages exactly the Rauthy client it created itself:
 
 ### What counts as ownership
 
-The only evidence is `status.ownership` (`clientID` and `createdAt`) on the
-`Client`, as the API server holds it. The provider writes it through the
-status subresource immediately after Rauthy accepts the create. A `Client`
-owns a Rauthy client exactly when `status.ownership.clientID` equals its
-external name. Annotations, including Crossplane's
-`crossplane.io/external-create-*` marks, influence neither what the provider
-does nor what it reports.
+The only evidence is `status.ownership` on the `Client`, as the API server
+holds it: `clientID`, `createdAt` and, for a confidential client,
+`secretFingerprint`. The provider writes it through the status subresource
+immediately after Rauthy accepts the create. Annotations, including
+Crossplane's `crossplane.io/external-create-*` marks, influence neither what
+the provider does nor what it reports.
 
-Before it acts as the owner (reports the client as existing, reads its
-secret, updates or deletes it), the provider re-reads the `Client` straight
-from the API server, bypassing its cache, and requires the record there, on
-the same object (same UID). A lagging cache can therefore delay the provider
-but never make it act on a client it does not own.
+**The record is bound to the client's secret.** For a confidential client,
+`secretFingerprint` is the hex SHA-256 of `rauthy-client-secret-v1`, the
+client id and the secret Rauthy issued at creation, separated by NUL bytes.
+The secret itself is never stored, logged or put in an event or condition.
+A `Client` owns a Rauthy client when the record names its external name and,
+for a confidential client, the fingerprint of the client's current secret
+matches. A client with the right id but another secret is not the client the
+record was made for.
+
+- **Rotating a client's secret in the Rauthy UI orphans it from the provider,
+  by design**: the provider can no longer tell it from a client somebody else
+  created with the same id, so it stops managing it (state S2' below).
+- **A public client has no secret.** Its binding is the id alone, so a public
+  client deleted and recreated by someone else with the same id is still
+  taken for the resource's own.
+- **`confidential` is immutable** (enforced by the CRD and by the
+  controller): switching would change the binding. Delete and recreate the
+  `Client` to switch.
+
+Before it acts as the owner (reports the client as existing, reads or
+publishes its secret, updates or deletes it), the provider re-reads the
+`Client` straight from the API server, bypassing its cache, requires the
+record there on the same object (same UID), and checks the fingerprint. A
+lagging cache can therefore delay the provider but never make it act on a
+client it does not own.
 
 The provider keeps one invariant: **a record names a client id only while
 this resource's client with that id exists in Rauthy.**
@@ -78,28 +97,47 @@ this resource's client with that id exists in Rauthy.**
 | State | Record | Rauthy client | What happens |
 | ----- | ------ | ------------- | ------------ |
 | S0    | none   | none          | The client is created. |
-| S1    | none   | exists        | Refused with the message above. |
-| S2    | id     | exists        | Owned: observed, updated, deleted. |
+| S1    | none   | exists        | Refused: no ownership record (message above). |
+| S2    | id     | ours          | Owned: observed, updated, deleted. |
+| S2'   | id     | not ours      | Refused: the client with the id is not the one the record was made for (another secret, or public where the record has a fingerprint). Never published, updated or deleted. |
 | S3    | id     | none          | Transient: the record is cleared, confirmed, before anything else. |
 
-- **Create** (S0): the POST, then the record. If writing the record fails,
-  the provider re-reads the `Client` without the cache: if the record landed
-  anyway, the client is kept (S2); if it did not, the new client is deleted
-  again (back to S0); if even the re-read fails, the client is neither
-  deleted nor claimed, and the next reconcile decides from a fresh read (S2
-  or S1). Re-reads and the rollback run on their own bounded context, so an
-  expired reconcile deadline does not stop them.
+- **Create** (S0): the POST, then the secret is read and the record (id and
+  fingerprint) is written in one status patch. If the secret cannot be read,
+  the new client is deleted again. If writing the record fails, the provider
+  re-reads the `Client` without the cache: if the record landed anyway, the
+  client is kept (S2); if it did not, the new client is deleted again (back to
+  S0); if even the re-read fails, the client is neither deleted nor claimed,
+  and the next reconcile decides from a fresh read (S2 or S1). Re-reads and
+  the rollback run on their own bounded context, so an expired reconcile
+  deadline does not stop them.
 - **Delete** (S2): the DELETE, then the record is cleared at once.
 - **A client that disappears** (S2 to S3, by Delete or out of band): the next
   observation clears the record and only then lets the resource create again
   or finish deleting.
+- **S2'** reports `the client with id "<id>" in Rauthy is not the one this
+  resource created (its secret differs: it was recreated or its secret was
+  rotated outside this provider), so it is not managed`. The record is left
+  as it is. To recover, delete that client in Rauthy (S3, then the record is
+  cleared and the resource creates its own client again, with a new secret),
+  or delete the `Client`, which finalizes without touching the Rauthy client.
 
 What each interruption leaves: before the POST, S0; between the POST and the
 record, S1 (refused until someone deletes the client in Rauthy); after the
 record, S2; between a DELETE and clearing the record, S3, which the next
-reconcile repairs. One window cannot be closed: in S3, a client someone else
-creates with the same id before the record is cleared looks like S2. Avoid
-reusing client ids across owners.
+reconcile repairs.
+
+Windows that remain:
+
+- **Closed for confidential clients**: a client deleted in Rauthy and
+  recreated by someone else with the same id while the record still exists
+  (S3 looking like S2) now lands in S2', because the new client's secret
+  differs.
+- **Public clients**: that window stays open; the binding is the id alone.
+- **Anyone who can write `clients/status`** can write any record, including
+  a fingerprint (see below).
+- **Anyone who knows a client's secret** can compute its fingerprint and, with
+  `clients/status` write access, forge a record for it.
 
 The API server ignores `status` when a `Client` is created or updated through
 the main resource, so a manifest cannot carry ownership. What it does rely on:
@@ -230,7 +268,8 @@ pattern: 2 to 256 letters, digits, `.`, `_` or `-`.
 | `issuer`        | every client             |
 | `client_secret` | confidential clients only |
 
-The secret is read from Rauthy on every observation and never logged.
+The secret is read from Rauthy on every observation, checked against the
+ownership record, and never logged.
 
 ## Field reference
 
@@ -240,7 +279,7 @@ and `redirectUris` are required.
 | Field                    | Type     | Notes                                                                      |
 | ------------------------ | -------- | -------------------------------------------------------------------------- |
 | `name`                   | string   | Display name on the login page.                                            |
-| `confidential`           | bool     | Required. A confidential client gets a secret generated by Rauthy.          |
+| `confidential`           | bool     | Required and immutable. A confidential client gets a secret generated by Rauthy. |
 | `enabled`                | bool     | Whether the client may be used to log in.                                  |
 | `redirectUris`           | []string | Required, at least one.                                                    |
 | `postLogoutRedirectUris` | []string |                                                                            |
