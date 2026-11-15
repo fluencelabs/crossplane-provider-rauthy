@@ -144,3 +144,16 @@ func sameSet(a, b []string) bool {
 	slices.Sort(b)
 	return slices.Equal(a, b)
 }
+
+// The ownership record is bound to the client's secret, so confidentiality
+// must not change after creation.
+func TestCRDConfidentialIsImmutable(t *testing.T) {
+	t.Parallel()
+	rules := clientForProvider(t)["confidential"].XValidations
+	for _, r := range rules {
+		if r.Rule == "self == oldSelf" {
+			return
+		}
+	}
+	t.Errorf("confidential has validations %+v, want the rule self == oldSelf", rules)
+}

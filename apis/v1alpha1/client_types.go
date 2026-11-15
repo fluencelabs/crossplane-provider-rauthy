@@ -22,7 +22,10 @@ type ClientParameters struct {
 	Name *string `json:"name,omitempty"`
 
 	// Confidential clients authenticate with a secret that Rauthy generates.
-	// A public client has no secret and must use S256 PKCE.
+	// A public client has no secret and must use S256 PKCE. Immutable: the
+	// ownership record is bound to the secret, so a client cannot switch
+	// between confidential and public after creation.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="confidential is immutable"
 	Confidential bool `json:"confidential"`
 
 	// Enabled controls whether the client may be used to log in.
@@ -171,6 +174,13 @@ type ClientOwnership struct {
 
 	// CreatedAt is when the provider created the client.
 	CreatedAt metav1.Time `json:"createdAt"`
+
+	// SecretFingerprint binds the record to the client's secret: the hex
+	// SHA-256 of "rauthy-client-secret-v1", the client id and the secret
+	// Rauthy issued, separated by NUL bytes. Empty for a public client, which
+	// has no secret. The secret itself is never stored.
+	// +optional
+	SecretFingerprint string `json:"secretFingerprint,omitempty"`
 }
 
 // A ClientStatus represents the observed state of a Client.
