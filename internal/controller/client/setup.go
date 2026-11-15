@@ -12,12 +12,14 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/controller"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/feature"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/ratelimiter"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/statemetrics"
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	"github.com/fluencelabs/rauthy-go"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	kube "sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,12 +43,19 @@ func SetupGated(mgr ctrl.Manager, o controller.Options) error {
 func Setup(mgr ctrl.Manager, o controller.Options) error {
 	name := managed.ControllerName(v1alpha1.ClientGroupKind)
 
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &v1alpha1.Client{}, ClientIDIndex,
+		IndexClientID); err != nil {
+		return fmt.Errorf("cannot index Clients by recorded client id: %w", err)
+	}
+
+	log := o.Logger.WithValues("controller", name)
 	opts := append(ReconcilerOptions(&Connector{
 		Kube:   mgr.GetClient(),
 		Reader: mgr.GetAPIReader(),
 		Usage:  resource.NewProviderConfigUsageTracker(mgr.GetClient(), &v1alpha1.ProviderConfigUsage{}),
+		Logger: log,
 	}),
-		managed.WithLogger(o.Logger.WithValues("controller", name)),
+		managed.WithLogger(log),
 		managed.WithPollInterval(o.PollInterval),
 		//nolint:staticcheck // crossplane-runtime has not moved to the new events API yet.
 		managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))),
@@ -105,10 +114,14 @@ type Connector struct {
 	// Kube is the manager's (cached) client.
 	Kube kube.Client
 	// Reader reads from the API server without a cache; ownership is
-	// confirmed through it. Kube is used when it is nil, which is only right
-	// for a client that has no cache.
+	// confirmed and the API key read through it. Kube is used when it is
+	// nil, which is only right for a client that has no cache. When Reader
+	// is set, Kube must index Clients by ClientIDIndex.
 	Reader kube.Reader
 	Usage  UsageTracker
+	// Logger receives what only the provider's operator may see, such as
+	// which Client holds a record that blocks another one. Nil discards it.
+	Logger logging.Logger
 
 	// crd is shared by every external client of this connector: once the
 	// installed CRD is found to prune status.ownership, no further client is
@@ -142,9 +155,11 @@ func (c *Connector) Connect(
 		return nil, fmt.Errorf("cannot get ClusterProviderConfig %q: %w", ref.Name, err)
 	}
 
-	sel := pc.Spec.Credentials.SecretRef
-	key, err := resource.CommonCredentialExtractor(ctx, pc.Spec.Credentials.Source, c.Kube,
-		xpv2.CommonCredentialSelectors{SecretRef: &sel})
+	reader, cache := c.Reader, kube.Reader(c.Kube)
+	if reader == nil {
+		reader, cache = c.Kube, nil
+	}
+	key, err := readAPIKey(ctx, reader, pc.Spec.Credentials)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read the Rauthy API key: %w", err)
 	}
@@ -153,9 +168,24 @@ func (c *Connector) Connect(
 	if err != nil {
 		return nil, fmt.Errorf("cannot build the Rauthy client: %w", err)
 	}
-	reader := c.Reader
-	if reader == nil {
-		reader = c.Kube
+	e := newExternal(api, c.Kube.Status(), reader, cache, issuerFor(pc.Spec.URL, pc.Spec.IssuerURL), &c.crd)
+	if c.Logger != nil {
+		e.log = c.Logger
 	}
-	return newExternal(api, c.Kube.Status(), reader, issuerFor(pc.Spec.URL, pc.Spec.IssuerURL), &c.crd), nil
+	return e, nil
+}
+
+// readAPIKey reads the API key from its Secret through r, which must not be
+// the cached client: a cached read would start an informer over every Secret
+// in the cluster.
+func readAPIKey(ctx context.Context, r kube.Reader, creds v1alpha1.ProviderCredentials) ([]byte, error) {
+	if creds.Source != xpv2.CredentialsSourceSecret {
+		return nil, fmt.Errorf("unsupported credentials source %q: only Secret is supported", creds.Source)
+	}
+	sel := creds.SecretRef
+	s := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: sel.Namespace, Name: sel.Name}, s); err != nil {
+		return nil, fmt.Errorf("cannot get the credentials Secret: %w", err)
+	}
+	return s.Data[sel.Key], nil
 }

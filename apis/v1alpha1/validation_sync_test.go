@@ -3,6 +3,7 @@ package v1alpha1_test
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"testing"
@@ -33,15 +34,20 @@ func clientForProvider(t *testing.T) map[string]apiextensionsv1.JSONSchemaProps 
 	return schema.Properties["spec"].Properties["forProvider"].Properties
 }
 
+// noneOr prefixes the pattern of an optional string: the empty string means
+// "none".
+const noneOr = "^$|"
+
 func TestCRDPatternsMatchRauthy(t *testing.T) {
 	t.Parallel()
 	props := clientForProvider(t)
 
+	// Optional strings also accept "", which clears them.
 	scalar := map[string]string{
-		"name":                 rauthy.ClientNamePattern().String(),
-		"clientUri":            rauthy.URIPattern().String(),
-		"backchannelLogoutUri": rauthy.URIPattern().String(),
-		"restrictGroupPrefix":  rauthy.GroupPattern().String(),
+		"name":                 noneOr + rauthy.ClientNamePattern().String(),
+		"clientUri":            noneOr + rauthy.URIPattern().String(),
+		"backchannelLogoutUri": noneOr + rauthy.URIPattern().String(),
+		"restrictGroupPrefix":  noneOr + rauthy.GroupPattern().String(),
 	}
 	for field, want := range scalar {
 		if got := props[field].Pattern; got != want {
@@ -156,4 +162,34 @@ func TestCRDConfidentialIsImmutable(t *testing.T) {
 		}
 	}
 	t.Errorf("confidential has validations %+v, want the rule self == oldSelf", rules)
+}
+
+// Optional fields accept an explicit "none": an empty list or an empty
+// string. flowsEnabled cannot be empty in Rauthy, and redirectUris is
+// required, so both keep at least one item.
+func TestCRDOptionalFieldsAcceptNone(t *testing.T) {
+	t.Parallel()
+	props := clientForProvider(t)
+
+	for _, field := range []string{
+		"postLogoutRedirectUris", "allowedOrigins", "scopes", "defaultScopes", "challenges", "contacts",
+	} {
+		if p := props[field]; p.MinItems != nil {
+			t.Errorf("%s: minItems %d, want none so that [] clears it", field, *p.MinItems)
+		}
+	}
+	for _, field := range []string{"redirectUris", "flowsEnabled"} {
+		if p := props[field]; p.MinItems == nil || *p.MinItems != 1 {
+			t.Errorf("%s: minItems %v, want 1", field, p.MinItems)
+		}
+	}
+	for _, field := range []string{"name", "clientUri", "backchannelLogoutUri", "restrictGroupPrefix"} {
+		re, err := regexp.Compile(props[field].Pattern)
+		if err != nil {
+			t.Fatalf("%s: %v", field, err)
+		}
+		if !re.MatchString("") {
+			t.Errorf("%s: pattern %q rejects the empty string", field, props[field].Pattern)
+		}
+	}
 }

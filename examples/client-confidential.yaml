@@ -18,6 +18,9 @@ spec:
       - https://grafana.example.com/login/generic_oauth
     postLogoutRedirectUris:
       - https://grafana.example.com/login
+    # An empty list or string clears the field in Rauthy; leaving a field out
+    # keeps what Rauthy holds.
+    allowedOrigins: []
     flowsEnabled:
       - authorization_code
       - refresh_token

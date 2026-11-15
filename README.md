@@ -34,13 +34,15 @@ rejected by the API server.
 create.** A `Client` manages exactly the Rauthy client it created itself:
 
 - If a client with the same id already exists in Rauthy and the `Client`
-  holds no ownership record for it, the `Client` reports `a client with id
-  "<id>" exists in Rauthy and this resource holds no ownership record for it,
-  so it is not managed; if an interrupted create of this resource made it,
-  delete it in Rauthy to retry, otherwise choose another id` and does nothing
-  else: it does not mark the resource as existing, does not update the client
-  and does not publish its secret. This one message is used whatever the
-  reason; the provider cannot tell a stranger's client from one its own
+  holds no ownership record for it, or another `Client` in any namespace
+  records the id, the `Client` reports `a client with id "<id>" exists in
+  Rauthy or is recorded by another Client, and this resource holds no
+  ownership record for it, so it is not managed; if an interrupted create of
+  this resource made it, delete it in Rauthy to retry, otherwise choose another
+  id` and does nothing else: it does not create the client, does not mark the
+  resource as existing, does not update the client and does not publish its
+  secret. This one message is used whatever the reason, and it never names the
+  other `Client`; the provider cannot tell a stranger's client from one its own
   interrupted create left behind, so check before deleting anything.
 - Deleting a `Client` deletes only a Rauthy client it created. A `Client` that
   never created anything (for example one stuck on the error above) is deleted
@@ -78,8 +80,37 @@ record was made for.
   by design**: the provider can no longer tell it from a client somebody else
   created with the same id, so it stops managing it (state S2' below).
 - **A public client has no secret.** Its binding is the id alone, so a public
-  client deleted and recreated by someone else with the same id is still
+  client deleted and recreated outside Kubernetes with the same id is still
   taken for the resource's own.
+- **A record must be the only one for its id.** Rauthy client ids are global,
+  while `Client` objects are namespaced. If another `Client` (another UID)
+  records the same id, this one is refused. Every observation looks such a
+  record up in the provider's cache (an index on `status.ownership.clientID`),
+  which can miss a record written within the cache's lag. The create and the
+  delete do not rely on that: right before the create call and right before
+  the delete call the provider lists every `Client` in the cluster straight
+  from the API server and refuses on a match. This holds for confidential clients too: two
+  records of one id can only come from a record that outlived its client or
+  from a forged one, and the provider cannot tell which of the two is right.
+  A record left behind by a client deleted out of band therefore blocks other
+  namespaces from creating that id until its own `Client` sees the client
+  gone and clears it. Its next successful observation does that, but only if
+  it gets one: a `Client` that is paused, whose provider config or API key is
+  broken, or whose management policies are refused never observes, and its
+  record keeps the id blocked indefinitely. The refusal message never names the
+  holder; an operator finds it with `kubectl get clients -A` (the `RECORDED-ID`
+  column shows `status.ownership.clientID`) or in the provider's log, which
+  names both objects (`Refusing a client id another Client records`, with
+  `recorded-by` set to the holder). To unblock the id, make the holder
+  reconcile again (unpause it, fix its provider config or API key, fix its
+  management policies): it then clears the stale record. Deleting the holder
+  also clears it, since management policies are not checked while a `Client`
+  is being deleted, except for a holder that is paused or whose provider
+  config or API key is broken: its finalizer is removed by the provider, so
+  such a holder stays until it can reconcile again. As a
+  last resort, an operator allowed to write `clients/status` can remove
+  `status.ownership` from the holder; that is safe only after checking that
+  no client with that id exists in Rauthy.
 - **`confidential` is immutable** (enforced by the CRD and by the
   controller): switching would change the binding. Delete and recreate the
   `Client` to switch.
@@ -87,9 +118,17 @@ record was made for.
 Before it acts as the owner (reports the client as existing, reads or
 publishes its secret, updates or deletes it), the provider re-reads the
 `Client` straight from the API server, bypassing its cache, requires the
-record there on the same object (same UID), and checks the fingerprint. A
-lagging cache can therefore delay the provider but never make it act on a
-client it does not own.
+record there on the same object (same UID), checks that no other `Client`
+records the id (in the cache, and uncached again before a delete), and checks
+the fingerprint. The other-record check of an observation is answered from
+the cache, so a record another `Client` wrote within the cache's lag can be
+missed there, and everything that observation decides as the owner rests on
+it: publishing the connection details (including a confidential client's
+secret), reporting the client as existing and `Ready`, and the update that
+follows. Create and Delete do not rest on it: right before the create call
+and the delete call the check is repeated uncached, so a lagging cache never
+makes the provider create or delete a client whose id another `Client`
+records.
 
 The provider keeps one invariant: **a record names a client id only while
 this resource's client with that id exists in Rauthy.**
@@ -101,6 +140,7 @@ this resource's client with that id exists in Rauthy.**
 | S2    | id     | ours          | Owned: observed, updated, deleted. |
 | S2'   | id     | not ours      | Refused: the client with the id is not the one the record was made for (another secret, or public where the record has a fingerprint). Never published, updated or deleted. |
 | S3    | id     | none          | Transient: the record is cleared, confirmed, before anything else. |
+| S4    | id on another `Client` too | any | Refused with the message above: never created, published, updated or deleted. Deleting the `Client` finalizes it without touching Rauthy. |
 
 - **Create** (S0): the POST, then the secret is read and the record (id and
   fingerprint) is written in one status patch. If the secret cannot be read,
@@ -133,9 +173,19 @@ Windows that remain:
   recreated by someone else with the same id while the record still exists
   (S3 looking like S2) now lands in S2', because the new client's secret
   differs.
-- **Public clients**: that window stays open; the binding is the id alone.
+- **Public clients across namespaces: closed.** A `Client` in another
+  namespace can no longer create an id another `Client` records, and a
+  `Client` whose record is shared with another never acts on the client, so a
+  record that outlived its client cannot be used to update or delete another
+  namespace's client.
+- **Public clients recreated outside Kubernetes**: that window stays open;
+  the binding is the id alone.
 - **Anyone who can write `clients/status`** can write any record, including
-  a fingerprint (see below).
+  a fingerprint (see below). The single-record check limits what a forged
+  record achieves while the real owner's record exists (both `Client`s are
+  refused, which blocks the owner but does not hand over the client), but it
+  does not stop a forged record for an id no other `Client` records, and once
+  the real owner's `Client` is deleted the forged record is the only one left.
 - **Anyone who knows a client's secret** can compute its fingerprint and, with
   `clients/status` write access, forge a record for it.
 
@@ -226,6 +276,12 @@ spec:
       key: api-key
 ```
 
+The provider keeps no cache of Secrets: it reads the API key and writes the
+connection Secrets with direct API calls, so it never lists or watches
+Secrets. The permissions it uses on Secrets are `get`, `create` and `patch`;
+it has no RBAC of its own beyond what Crossplane grants the provider's service
+account.
+
 `url` is where the provider reaches Rauthy; `/auth/v1` is appended
 automatically. It must not carry a query or fragment, and the provider does not
 follow redirects: a `url` that answers 3xx fails with a message naming where it
@@ -287,7 +343,7 @@ settings listed under "Not yet supported". Only `confidential` and
 | `redirectUris`           | []string | Required, at least one.                                                    |
 | `postLogoutRedirectUris` | []string |                                                                            |
 | `allowedOrigins`         | []string | Extra CORS origins, `scheme://host[:port]` without a path.                 |
-| `flowsEnabled`           | []string | `authorization_code`, `client_credentials`, `urn:ietf:params:oauth:grant-type:device_code`, `password`, `refresh_token`. |
+| `flowsEnabled`           | []string | `authorization_code`, `client_credentials`, `urn:ietf:params:oauth:grant-type:device_code`, `password`, `refresh_token`. At least one; cannot be cleared. |
 | `accessTokenAlg`         | string   | `RS256`, `RS384`, `RS512` or `EdDSA`.                                      |
 | `idTokenAlg`             | string   | `RS256`, `RS384`, `RS512` or `EdDSA`.                                      |
 | `authCodeLifetime`       | int      | Seconds, 10 to 300.                                                        |
@@ -309,9 +365,26 @@ and requires a value for most fields. For every field the spec leaves out, the
 provider sends back what Rauthy currently holds: the defaults Rauthy picked at
 creation, or a value an earlier spec set. Removing a field from the spec
 therefore does not revert it; to change a setting, set it explicitly. Lists are
-compared as sets, so their order does not matter, and an empty list is
-rejected rather than silently ignored. `status.atProvider` shows the client as
-Rauthy reports it.
+compared as sets, so their order does not matter. `status.atProvider` shows
+the client as Rauthy reports it.
+
+**An explicit empty value clears.** To remove a setting, set the list to `[]`
+or the string to `""`:
+
+```yaml
+  forProvider:
+    allowedOrigins: []         # no extra CORS origins
+    restrictGroupPrefix: ""    # no group restriction
+```
+
+The resource reports drift until Rauthy holds no value for the field. Rauthy
+receives `null` for the fields its API marks nullable (`name`,
+`postLogoutRedirectUris`, `allowedOrigins`, `challenges`, `clientUri`,
+`contacts`, `backchannelLogoutUri`, `restrictGroupPrefix`) and `[]` for
+`scopes` and `defaultScopes`, which it requires as lists. `flowsEnabled`
+cannot be empty in Rauthy and keeps `minItems: 1`; `redirectUris` and
+`confidential` are required. Should Rauthy keep a value of its own for a
+cleared field, the resource stays out of sync and names the field.
 
 A new client is created in two steps: the create call carries only the id,
 name, confidentiality and redirect URIs (all Rauthy accepts there), and the
@@ -326,8 +399,6 @@ matches the spec.
   custom claims (with `claims_at_root`). Whatever a client holds for them is
   kept unchanged on every update.
 - Secret rotation.
-- Clearing an optional field or list once set (removing it from the spec keeps
-  the last value, see above).
 - Adopting or importing an existing Rauthy client (by design, see the
   no-adoption rule).
 - Removing `client_secret` from an existing connection Secret when a client

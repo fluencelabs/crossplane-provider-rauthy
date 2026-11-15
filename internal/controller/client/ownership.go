@@ -13,6 +13,7 @@ import (
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	"github.com/fluencelabs/rauthy-go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	kube "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/fluencelabs/crossplane-provider-rauthy/apis/v1alpha1"
@@ -40,6 +41,8 @@ import (
 //
 //	S0   M absent,  C absent      Observe: not exists -> Create.
 //	S1   M absent,  C present     refused: not ours (or a leaked create of ours).
+//	S4   M = id on another Client refused, whatever C is: neither copy may act
+//	                              as the owner, and none may create the id.
 //	S2   M = id,    C ours        owned: observe, update, delete.
 //	S2'  M = id,    C different   refused: C is not the client M was recorded
 //	                              for (secret differs, or confidentiality
@@ -139,6 +142,10 @@ func (e *external) verifyOwner(
 	if rec == nil {
 		return notOwned, nil, nil
 	}
+	taken, err := e.recordedElsewhereCached(ctx, fresh, id)
+	if err != nil || taken {
+		return notOwned, nil, err
+	}
 	if !got.Confidential {
 		// A public client has no secret: the binding is the id alone. A
 		// fingerprint means the client was confidential when recorded.
@@ -166,6 +173,88 @@ func (e *external) verifyOwner(
 	return ownedClient, s.Secret, nil
 }
 
+// ClientIDIndex is the cache field index of Clients by the client id their
+// status.ownership records.
+const ClientIDIndex = "status.ownership.clientID"
+
+// IndexClientID extracts the ClientIDIndex value of a Client: the client id
+// its record names, if any.
+func IndexClientID(o kube.Object) []string {
+	cr, ok := o.(*v1alpha1.Client)
+	if !ok {
+		return nil
+	}
+	if id := ownedClientID(cr); id != "" {
+		return []string{id}
+	}
+	return nil
+}
+
+// recordedElsewhere reports whether another Client, in any namespace, records
+// id in its status.ownership. Client ids are global in Rauthy while Clients
+// are namespaced, and a public client's record is bound by the id alone: a
+// record held by two objects cannot tell which of them created the client, so
+// neither may act as its owner, and no Client may create an id another one
+// records.
+//
+// This is the authoritative check: every Client is listed from the API
+// server, bypassing the cache. Create runs it right before the POST and
+// Delete right before the DELETE.
+func (e *external) recordedElsewhere(ctx context.Context, cr *v1alpha1.Client, id string) (bool, error) {
+	ctx, cancel := detached(ctx)
+	defer cancel()
+	all := &v1alpha1.ClientList{}
+	if err := e.reader.List(ctx, all); err != nil {
+		return false, fmt.Errorf("cannot confirm ownership of client %q: cannot list Clients without the cache: %w",
+			id, err)
+	}
+	return e.refusedFor(cr, otherRecord(all.Items, cr, id), id), nil
+}
+
+// recordedElsewhereCached is recordedElsewhere answered from the cache,
+// through the ClientIDIndex, for the paths that run on every poll. It can miss
+// a record written within the cache's lag, and everything Observe decides as
+// the owner rests on it: publishing the connection details (a confidential
+// client's secret included), reporting the client as existing and Ready, and
+// the Update that follows. Create and Delete do not: they repeat the check
+// uncached right before the POST and the DELETE.
+func (e *external) recordedElsewhereCached(ctx context.Context, cr *v1alpha1.Client, id string) (bool, error) {
+	if e.cache == nil {
+		return e.recordedElsewhere(ctx, cr, id)
+	}
+	same := &v1alpha1.ClientList{}
+	if err := e.cache.List(ctx, same, kube.MatchingFields{ClientIDIndex: id}); err != nil {
+		return false, fmt.Errorf("cannot confirm ownership of client %q: cannot look up other records: %w", id, err)
+	}
+	return e.refusedFor(cr, otherRecord(same.Items, cr, id), id), nil
+}
+
+// refusedFor reports whether other blocks cr and, if so, names other in the
+// provider's log so that an operator can find the holder. The resource's
+// conditions and events never name it: a tenant must not learn another
+// namespace's objects from a refusal.
+func (e *external) refusedFor(cr, other *v1alpha1.Client, id string) bool {
+	if other == nil {
+		return false
+	}
+	e.log.Info("Refusing a client id another Client records",
+		"client-id", id,
+		"refused", kube.ObjectKeyFromObject(cr).String(),
+		"recorded-by", kube.ObjectKeyFromObject(other).String(),
+	)
+	return true
+}
+
+// otherRecord returns a Client among items, other than cr, that records id.
+func otherRecord(items []v1alpha1.Client, cr *v1alpha1.Client, id string) *v1alpha1.Client {
+	for i := range items {
+		if other := &items[i]; other.GetUID() != cr.GetUID() && ownedClientID(other) == id {
+			return other
+		}
+	}
+	return nil
+}
+
 // ensureOwned is verifyOwner for the acting paths, reusing a confirmation
 // already made in this reconcile. A client that no longer exists is not
 // owned: there is nothing to act on.
@@ -184,19 +273,33 @@ func (e *external) ensureOwned(ctx context.Context, cr *v1alpha1.Client, id stri
 // patchOwnership writes the marker (nil clears it) and reports what the API
 // server holds afterwards: the patch answer when it succeeded, an uncached
 // read when it failed. known is false when neither could be learned.
+//
+// The answer is decoded into an empty object, not into cr: the client decodes
+// it without zeroing the target first, so a field the server pruned (absent
+// from the answer) would otherwise keep the marker cr was given. The answer
+// then replaces cr whole, as decoding into cr used to: cr carries the
+// server's current spec, metadata and resourceVersion together, so a later
+// Update of cr cannot write back a spec or finalizers that changed meanwhile.
 func (e *external) patchOwnership(
 	ctx context.Context,
 	cr *v1alpha1.Client,
 	want *v1alpha1.ClientOwnership,
 ) (*v1alpha1.ClientOwnership, bool, error) {
-	orig := cr.DeepCopy()
-	cr.Status.Ownership = want
-	patchErr := e.status.Patch(ctx, cr, kube.MergeFrom(orig))
+	desired := cr.DeepCopy()
+	desired.Status.Ownership = want
+	patch, err := kube.MergeFrom(cr).Data(desired)
+	if err != nil {
+		return nil, false, fmt.Errorf("cannot build the status.ownership patch: %w", err)
+	}
+	answer := &v1alpha1.Client{}
+	answer.SetNamespace(cr.GetNamespace())
+	answer.SetName(cr.GetName())
+	patchErr := e.status.Patch(ctx, answer, kube.RawPatch(types.MergePatchType, patch))
 	if patchErr == nil {
 		// The answer is the object as stored.
+		answer.DeepCopyInto(cr)
 		return cr.Status.Ownership, true, nil
 	}
-	cr.Status.Ownership = orig.Status.Ownership
 	fresh, err := e.readFresh(ctx, cr)
 	if err != nil {
 		return nil, false, fmt.Errorf(
@@ -329,13 +432,15 @@ func validateClientID(id string) error {
 	return nil
 }
 
-// notOwnedError is the one message for an existing client this resource holds
-// no record of, whatever the reason.
+// notOwnedError is the one message for a client id this resource holds no
+// record of that it may act on, whatever the reason: a client with the id
+// exists in Rauthy without a record of this resource, or another Client
+// records the id. It never names the other Client.
 func notOwnedError(id string) error {
 	return fmt.Errorf(
-		"a client with id %q exists in Rauthy and this resource holds no ownership record for it, so it is "+
-			"not managed; if an interrupted create of this resource made it, delete it in Rauthy to retry, "+
-			"otherwise choose another id: %w",
+		"a client with id %q exists in Rauthy or is recorded by another Client, and this resource holds no "+
+			"ownership record for it, so it is not managed; if an interrupted create of this resource made it, "+
+			"delete it in Rauthy to retry, otherwise choose another id: %w",
 		id, ErrAdoption,
 	)
 }

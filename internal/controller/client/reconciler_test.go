@@ -60,6 +60,11 @@ type harness struct {
 	cache *staleCache
 	r     *managed.Reconciler
 	key   kube.ObjectKey
+	// uncached counts the reads that bypass the cache.
+	uncached *countingReader
+	// provider captures what the external client logs on the provider side
+	// only.
+	provider *logSink
 	// events and logs capture what the reconciler tells the world.
 	events *record.FakeRecorder
 	logs   *logSink
@@ -139,16 +144,20 @@ func newHarness(t *testing.T, f *fakeRauthy, cr *v1alpha1.Client, intercept ...i
 	b := fake.NewClientBuilder().
 		WithScheme(s).
 		WithStatusSubresource(&v1alpha1.Client{}, &v1alpha1.ClusterProviderConfig{}).
-		WithObjects(providerConfig(f.srv.URL, new(testIssuer)), apiKeySecret(), cr)
+		WithObjects(providerConfig(f.srv.URL, new(testIssuer)), apiKeySecret(), cr).
+		WithIndex(&v1alpha1.Client{}, client.ClientIDIndex, client.IndexClientID)
 	for _, i := range intercept {
 		b = b.WithInterceptorFuncs(i)
 	}
 	k := b.Build()
 	cache := &staleCache{Client: k}
+	uncached := &countingReader{Reader: k}
+	provider := &logSink{}
 
 	c := &client.Connector{
 		Kube:   cache,
-		Reader: k,
+		Reader: uncached,
+		Logger: logging.NewLogrLogger(funcr.New(provider.add, funcr.Options{})),
 		Usage:  resource.NewProviderConfigUsageTracker(cache, &v1alpha1.ProviderConfigUsage{}),
 	}
 	events := record.NewFakeRecorder(1000)
@@ -160,7 +169,10 @@ func newHarness(t *testing.T, f *fakeRauthy, cr *v1alpha1.Client, intercept ...i
 	)
 	r := managed.NewReconciler(fakeManager{client: cache, scheme: s},
 		resource.ManagedKind(v1alpha1.ClientGroupVersionKind), opts...)
-	return &harness{kube: k, cache: cache, r: r, key: kube.ObjectKeyFromObject(cr), events: events, logs: logs}
+	return &harness{
+		kube: k, cache: cache, r: r, key: kube.ObjectKeyFromObject(cr), events: events, logs: logs,
+		uncached: uncached, provider: provider,
+	}
 }
 
 // reconcile runs n reconciles and returns the Client as stored afterwards, or
