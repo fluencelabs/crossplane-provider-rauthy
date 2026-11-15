@@ -29,10 +29,15 @@ const (
 var ErrAdoption = errors.New("adoption is not supported")
 
 var (
-	errEmptyID           = errors.New("the client id (the external name) is empty")
-	errInvalidID         = errors.New("invalid client id")
-	errNotOwned          = errors.New("refusing to modify a Rauthy client this resource did not create")
-	errIDChanged         = errors.New("the client id is immutable")
+	errEmptyID               = errors.New("the client id (the external name) is empty")
+	errInvalidID             = errors.New("invalid client id")
+	errNotOwned              = errors.New("refusing to modify a Rauthy client this resource did not create")
+	errIDChanged             = errors.New("the client id is immutable")
+	errNoSecret              = errors.New("no secret was reported for the new confidential client")
+	errConfidentialImmutable = errors.New(
+		"confidential cannot change after creation: the ownership record is bound to the client's secret; " +
+			"delete and recreate the Client to switch",
+	)
 	errCRDLacksOwnership = errors.New(
 		"the installed Client CRD does not keep status.ownership; upgrade the provider's CRDs and restart " +
 			"the provider",
@@ -131,19 +136,22 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Client) (managed.Ex
 		return managed.ExternalObservation{ResourceExists: false}, nil
 	}
 
-	owned, err := e.confirmOwnership(ctx, cr, id)
+	o, secret, err := e.verifyOwner(ctx, cr, id, got)
 	if err != nil {
 		return managed.ExternalObservation{}, err
 	}
-	if !owned {
+	if o != ownedClient {
 		if meta.WasDeleted(cr) {
 			// Nothing of ours exists: let the resource go without touching
 			// Rauthy.
 			return managed.ExternalObservation{ResourceExists: false}, nil
 		}
+		if o == otherClient {
+			return managed.ExternalObservation{}, otherClientError(id)
+		}
 		return managed.ExternalObservation{}, notOwnedError(id)
 	}
-	return e.observeOwned(ctx, cr, got)
+	return e.observeOwned(cr, got, secret)
 }
 
 // releasable reports whether a resource being deleted owns nothing, so it can
@@ -194,20 +202,20 @@ func (e *external) clearStaleMarker(ctx context.Context, cr *v1alpha1.Client) er
 
 // observeOwned reports a client whose ownership is confirmed.
 func (e *external) observeOwned(
-	ctx context.Context,
 	cr *v1alpha1.Client,
 	got *rauthy.ClientResponse,
+	secret *string,
 ) (managed.ExternalObservation, error) {
 	cr.Status.AtProvider = observation(got)
 	if meta.WasDeleted(cr) {
 		// Deleting an owned client: existence is all the reconciler needs.
 		return managed.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
 	}
-
-	details, err := e.connectionDetails(ctx, got)
-	if err != nil {
+	if err := checkConfidential(cr, got); err != nil {
 		return managed.ExternalObservation{}, err
 	}
+
+	details := e.connectionDetails(got, secret)
 
 	diff := differences(&cr.Spec.ForProvider, got)
 	if len(diff) == 0 {
@@ -239,10 +247,31 @@ func (e *external) Create(ctx context.Context, cr *v1alpha1.Client) (managed.Ext
 	if _, err := e.api.CreateClient(ctx, createRequest(id, &cr.Spec.ForProvider)); err != nil {
 		return managed.ExternalCreation{}, e.createFailed(ctx, id, err)
 	}
-	if err := e.recordOwnership(ctx, cr, id); err != nil {
+	fingerprint, err := e.bindingFor(ctx, cr, id)
+	if err != nil {
+		cr.Status.Ownership = nil
+		return managed.ExternalCreation{}, e.rollback(ctx, id, err)
+	}
+	if err = e.recordOwnership(ctx, cr, id, fingerprint); err != nil {
 		return managed.ExternalCreation{}, err
 	}
 	return managed.ExternalCreation{}, nil
+}
+
+// bindingFor reads the secret Rauthy issued for the client just created and
+// returns its fingerprint; "" for a public client.
+func (e *external) bindingFor(ctx context.Context, cr *v1alpha1.Client, id string) (string, error) {
+	if !cr.Spec.ForProvider.Confidential {
+		return "", nil
+	}
+	s, err := e.api.GetClientSecret(ctx, id)
+	if err != nil {
+		return "", fmt.Errorf("cannot read the secret of the new client: %w", err)
+	}
+	if s.Secret == nil {
+		return "", errNoSecret
+	}
+	return secretFingerprint(id, *s.Secret), nil
 }
 
 // createFailed explains a failed POST; the outcome is known only here. A
@@ -263,17 +292,20 @@ func (e *external) createFailed(ctx context.Context, id string, postErr error) e
 
 func (e *external) Update(ctx context.Context, cr *v1alpha1.Client) (managed.ExternalUpdate, error) {
 	id := meta.GetExternalName(cr)
-	owned, err := e.ensureOwned(ctx, cr, id)
+	o, err := e.ensureOwned(ctx, cr, id)
 	if err != nil {
 		return managed.ExternalUpdate{}, err
 	}
-	if !owned {
+	if o != ownedClient {
 		return managed.ExternalUpdate{}, fmt.Errorf("client %q: %w", id, errNotOwned)
 	}
 
 	got, err := e.api.GetClient(ctx, id)
 	if err != nil {
 		return managed.ExternalUpdate{}, fmt.Errorf("cannot get Rauthy client %q: %w", id, err)
+	}
+	if err = checkConfidential(cr, got); err != nil {
+		return managed.ExternalUpdate{}, err
 	}
 
 	updated, err := e.api.UpdateClient(ctx, id, updateRequest(id, &cr.Spec.ForProvider, got))
@@ -292,11 +324,11 @@ func (e *external) Delete(ctx context.Context, cr *v1alpha1.Client) (managed.Ext
 	id := meta.GetExternalName(cr)
 	cr.SetConditions(xpv2.Deleting())
 
-	owned, err := e.ensureOwned(ctx, cr, id)
+	o, err := e.ensureOwned(ctx, cr, id)
 	if err != nil {
 		return managed.ExternalDelete{}, err
 	}
-	if !owned {
+	if o != ownedClient {
 		// Never delete a client this resource did not create.
 		return managed.ExternalDelete{}, nil
 	}
@@ -314,27 +346,27 @@ func (e *external) Delete(ctx context.Context, cr *v1alpha1.Client) (managed.Ext
 func (e *external) Disconnect(context.Context) error { return nil }
 
 // connectionDetails returns what a consumer needs to use the client. Only a
-// confidential client has a secret.
-func (e *external) connectionDetails(
-	ctx context.Context,
-	got *rauthy.ClientResponse,
-) (managed.ConnectionDetails, error) {
+// confidential client has a secret; it was read when ownership was confirmed.
+func (e *external) connectionDetails(got *rauthy.ClientResponse, secret *string) managed.ConnectionDetails {
 	details := managed.ConnectionDetails{
 		ConnectionKeyClientID: []byte(got.ID),
 		ConnectionKeyIssuer:   []byte(e.issuer),
 	}
-	if !got.Confidential {
-		return details, nil
+	if got.Confidential && secret != nil {
+		details[ConnectionKeyClientSecret] = []byte(*secret)
 	}
+	return details
+}
 
-	s, err := e.api.GetClientSecret(ctx, got.ID)
-	if err != nil {
-		return nil, fmt.Errorf("cannot get the secret of Rauthy client %q: %w", got.ID, err)
+// checkConfidential refuses a spec whose confidentiality differs from the
+// client's: the ownership record is bound to the secret, so confidentiality
+// cannot change after creation. The CRD refuses the change too; this covers
+// objects written past it.
+func checkConfidential(cr *v1alpha1.Client, got *rauthy.ClientResponse) error {
+	if cr.Spec.ForProvider.Confidential != got.Confidential {
+		return errConfidentialImmutable
 	}
-	if s.Secret != nil {
-		details[ConnectionKeyClientSecret] = []byte(*s.Secret)
-	}
-	return details, nil
+	return nil
 }
 
 func diffMessage(fields []string) string {

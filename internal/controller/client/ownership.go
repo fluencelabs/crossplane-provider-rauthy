@@ -2,6 +2,9 @@ package client
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
 	"slices"
 	"time"
@@ -14,40 +17,56 @@ import (
 	"github.com/fluencelabs/crossplane-provider-rauthy/apis/v1alpha1"
 )
 
-// Ownership evidence is status.ownership (the marker, M) as the API server
+// Ownership evidence is status.ownership (the record, M) as the API server
 // holds it. The API server ignores status on writes to the main resource, so
 // only a writer of the clients/status subresource (the provider) can set it.
 // Annotations, including the runtime's external-create-* marks, influence
 // neither behaviour nor wording.
 //
+// For a confidential client the record is bound to the client by a
+// fingerprint of the secret Rauthy issued when this resource created it; see
+// secretFingerprint. A client with the same id but another secret (recreated
+// by somebody else, or its secret rotated outside this provider) is not the
+// one the record names. A public client has no secret, so its binding is the
+// id alone.
+//
 // Invariant: M names a client id only while this resource's client (C) with
 // that id exists in Rauthy. Every write of M is confirmed by an uncached read
 // when its result is in doubt, and any decision to act as the owner is taken
-// from an uncached read.
+// from an uncached read plus, for a confidential client, the fingerprint.
 //
 // States, with M as the API server holds it and C the Rauthy client:
 //
-//	S0  M absent,  C absent   Observe: not exists -> Create.
-//	S1  M absent,  C present  refused: not ours (or a leaked create of ours).
-//	S2  M = id,    C present  owned: observe, update, delete.
-//	S3  M = id,    C absent   transient: Observe clears M (confirmed) before
-//	                          reporting "not exists"; nothing else happens.
+//	S0   M absent,  C absent      Observe: not exists -> Create.
+//	S1   M absent,  C present     refused: not ours (or a leaked create of ours).
+//	S2   M = id,    C ours        owned: observe, update, delete.
+//	S2'  M = id,    C different   refused: C is not the client M was recorded
+//	                              for (secret differs, or confidentiality
+//	                              differs). Never published, updated or
+//	                              deleted; deleting the resource finalizes
+//	                              without touching Rauthy. M is left as is.
+//	S3   M = id,    C absent      transient: Observe clears M (confirmed)
+//	                              before reporting "not exists".
 //
 // Transitions:
 //
-//	S0 -> S1  POST succeeds, then M cannot be recorded and the rollback DELETE
-//	          fails, or the provider stops before recording M.
-//	S0 -> S2  POST succeeds and M is recorded (confirmed by the patch answer or
-//	          by an uncached read after a failed patch).
-//	S2 -> S3  C deleted, by Delete or out of band. Delete clears M right after
-//	          the DELETE; Observe clears it on a 404.
-//	S3 -> S0  M cleared and confirmed.
+//	S0 -> S1   POST succeeds, then the secret cannot be read or M cannot be
+//	           recorded, and the rollback DELETE fails; or the provider stops
+//	           before recording M.
+//	S0 -> S2   POST succeeds, the secret is read and M (id and fingerprint) is
+//	           recorded, confirmed by the patch answer or an uncached read.
+//	S2 -> S3   C deleted, by Delete (which clears M right after the DELETE) or
+//	           out of band (Observe clears M on the 404).
+//	S3 -> S0   M cleared and confirmed.
+//	S2 -> S2'  Out of band: C deleted and recreated by somebody else before
+//	           Observe saw the 404, or its secret rotated.
+//	S2' -> S3  Somebody deletes C in Rauthy.
 //
 // Crash points: before the POST leaves S0; between the POST and M leaves S1
 // (refused until someone deletes C); after M leaves S2; between a DELETE and
-// clearing M leaves S3, which the next Observe repairs. The window that cannot
-// be closed: in S3, a third party creating the same id before M is cleared is
-// indistinguishable from S2.
+// clearing M leaves S3, which the next Observe repairs. For public clients the
+// S2 -> S2' transition cannot be detected: a recreated public client with the
+// same id looks like S2.
 
 // detachedTimeout bounds the repair calls (re-reads, clears and rollbacks)
 // that run on a context detached from the reconcile, whose deadline is the
@@ -83,29 +102,79 @@ func (e *external) readFresh(ctx context.Context, cr *v1alpha1.Client) (*v1alpha
 	return fresh, nil
 }
 
-// confirmOwnership decides ownership from an uncached read, and remembers the
-// answer for the rest of this reconcile.
-func (e *external) confirmOwnership(ctx context.Context, cr *v1alpha1.Client, id string) (bool, error) {
+// owner is what this resource is to an existing Rauthy client.
+type owner int
+
+const (
+	// notOwned: no record names the client.
+	notOwned owner = iota
+	// otherClient: the record names the id, but the client is not the one it
+	// was recorded for (S2').
+	otherClient
+	// ownedClient: the record names the client and the binding holds (S2).
+	ownedClient
+)
+
+// verifyOwner decides, from an uncached read of the Client and the binding,
+// whether this resource owns the Rauthy client got. For a confidential client
+// it returns the secret it read, so the caller need not fetch it again. The
+// answer is remembered for the rest of this reconcile.
+func (e *external) verifyOwner(
+	ctx context.Context,
+	cr *v1alpha1.Client,
+	id string,
+	got *rauthy.ClientResponse,
+) (owner, *string, error) {
+	e.confirmed = ""
 	fresh, err := e.readFresh(ctx, cr)
 	if err != nil {
-		return false, fmt.Errorf("cannot confirm ownership of client %q: %w", id, err)
+		return notOwned, nil, fmt.Errorf("cannot confirm ownership of client %q: %w", id, err)
 	}
 	cr.Status.Ownership = fresh.Status.Ownership
-	if ownedClientID(fresh) != id {
-		e.confirmed = ""
-		return false, nil
+	rec := fresh.Status.Ownership
+	if rec == nil || rec.ClientID != id {
+		return notOwned, nil, nil
+	}
+	if !got.Confidential {
+		// A public client has no secret: the binding is the id alone. A
+		// fingerprint means the client was confidential when recorded.
+		if rec.SecretFingerprint != "" {
+			return otherClient, nil, nil
+		}
+		e.confirmed = id
+		return ownedClient, nil, nil
+	}
+	if rec.SecretFingerprint == "" {
+		return otherClient, nil, nil
+	}
+	s, err := e.api.GetClientSecret(ctx, id)
+	if err != nil {
+		return notOwned, nil, fmt.Errorf("cannot read the secret of Rauthy client %q to confirm ownership: %w", id, err)
+	}
+	if s.Secret == nil {
+		return otherClient, nil, nil
+	}
+	current := secretFingerprint(id, *s.Secret)
+	if subtle.ConstantTimeCompare([]byte(current), []byte(rec.SecretFingerprint)) != 1 {
+		return otherClient, nil, nil
 	}
 	e.confirmed = id
-	return true, nil
+	return ownedClient, s.Secret, nil
 }
 
-// ensureOwned is confirmOwnership for the acting paths, reusing a
-// confirmation already made in this reconcile.
-func (e *external) ensureOwned(ctx context.Context, cr *v1alpha1.Client, id string) (bool, error) {
-	if e.confirmed != "" && e.confirmed == id {
-		return true, nil
+// ensureOwned is verifyOwner for the acting paths, reusing a confirmation
+// already made in this reconcile. A client that no longer exists is not
+// owned: there is nothing to act on.
+func (e *external) ensureOwned(ctx context.Context, cr *v1alpha1.Client, id string) (owner, error) {
+	if id != "" && e.confirmed == id {
+		return ownedClient, nil
 	}
-	return e.confirmOwnership(ctx, cr, id)
+	got, err := e.lookup(ctx, id)
+	if err != nil || got == nil {
+		return notOwned, err
+	}
+	o, _, err := e.verifyOwner(ctx, cr, id, got)
+	return o, err
 }
 
 // patchOwnership writes the marker (nil clears it) and reports what the API
@@ -115,25 +184,30 @@ func (e *external) patchOwnership(
 	ctx context.Context,
 	cr *v1alpha1.Client,
 	want *v1alpha1.ClientOwnership,
-) (string, bool, error) {
+) (*v1alpha1.ClientOwnership, bool, error) {
 	orig := cr.DeepCopy()
 	cr.Status.Ownership = want
 	patchErr := e.status.Patch(ctx, cr, kube.MergeFrom(orig))
 	if patchErr == nil {
 		// The answer is the object as stored.
-		return ownedClientID(cr), true, nil
+		return cr.Status.Ownership, true, nil
 	}
 	cr.Status.Ownership = orig.Status.Ownership
 	fresh, err := e.readFresh(ctx, cr)
 	if err != nil {
-		return "", false, fmt.Errorf(
+		return nil, false, fmt.Errorf(
 			"writing status.ownership failed (%w) and its outcome is unknown (%w)",
 			patchErr,
 			err,
 		)
 	}
 	cr.Status.Ownership = fresh.Status.Ownership
-	return ownedClientID(fresh), true, patchErr
+	return fresh.Status.Ownership, true, patchErr
+}
+
+// sameRecord reports whether the stored record is the one that was written.
+func sameRecord(stored, want *v1alpha1.ClientOwnership) bool {
+	return stored != nil && stored.ClientID == want.ClientID && stored.SecretFingerprint == want.SecretFingerprint
 }
 
 // clearOwnership removes the marker and returns nil only once the API server
@@ -144,31 +218,39 @@ func (e *external) clearOwnership(ctx context.Context, cr *v1alpha1.Client) erro
 	switch {
 	case !known:
 		return fmt.Errorf("cannot clear status.ownership: %w", err)
-	case stored != "":
-		return fmt.Errorf("cannot clear status.ownership (still %q): %w", stored, err)
+	case stored != nil:
+		return fmt.Errorf("cannot clear status.ownership (still %q): %w", stored.ClientID, err)
 	}
 	return nil
 }
 
-// recordOwnership records the marker for a client Rauthy just created.
+// recordOwnership records the marker, bound to fingerprint, for a client
+// Rauthy just created.
 //
 //   - Recorded (by the patch answer or an uncached read): success.
 //   - Known not to be recorded: the client is deleted again, so the next
 //     reconcile starts from S0 instead of refusing it forever.
 //   - Unknown: neither delete nor claim. The next Observe decides from an
 //     uncached read: owned if the marker landed, refused otherwise.
-func (e *external) recordOwnership(ctx context.Context, cr *v1alpha1.Client, id string) error {
+func (e *external) recordOwnership(ctx context.Context, cr *v1alpha1.Client, id, fingerprint string) error {
 	if e.crd.Load() {
 		return errCRDLacksOwnership
 	}
-	marker := &v1alpha1.ClientOwnership{ClientID: id, CreatedAt: metav1.NewTime(time.Now())}
+	marker := &v1alpha1.ClientOwnership{
+		ClientID:          id,
+		CreatedAt:         metav1.NewTime(time.Now()),
+		SecretFingerprint: fingerprint,
+	}
 	stored, known, err := e.patchOwnership(ctx, cr, marker)
 	switch {
 	case !known:
 		return fmt.Errorf(
 			"created Rauthy client %q but the outcome of recording its ownership is unknown: %w", id, err)
-	case stored == id:
+	case sameRecord(stored, marker):
 		return nil
+	case stored != nil:
+		// Something else is recorded: never replace it, never claim.
+		return fmt.Errorf("created Rauthy client %q but another ownership record is stored: %w", id, err)
 	case err == nil:
 		// The patch succeeded and the field is gone: the installed CRD prunes
 		// it. Every further create would end the same way, so stop creating.
@@ -178,6 +260,16 @@ func (e *external) recordOwnership(ctx context.Context, cr *v1alpha1.Client, id 
 	cr.Status.Ownership = nil
 	return e.rollback(ctx, id, err)
 }
+
+// secretFingerprint is the binding between a record and a confidential
+// client: a domain-separated SHA-256 of the client id and the secret. It
+// cannot be reversed into the secret.
+func secretFingerprint(id, secret string) string {
+	sum := sha256.Sum256([]byte(fingerprintDomain + "\x00" + id + "\x00" + secret))
+	return hex.EncodeToString(sum[:])
+}
+
+const fingerprintDomain = "rauthy-client-secret-v1"
 
 // rollback deletes a client whose ownership is known not to be recorded.
 func (e *external) rollback(ctx context.Context, id string, cause error) error {
@@ -233,6 +325,18 @@ func notOwnedError(id string) error {
 		"a client with id %q exists in Rauthy and this resource holds no ownership record for it, so it is "+
 			"not managed; if an interrupted create of this resource made it, delete it in Rauthy to retry, "+
 			"otherwise choose another id: %w",
+		id, ErrAdoption,
+	)
+}
+
+// otherClientError: the record names this id, but the client in Rauthy is not
+// the one it was recorded for (S2').
+func otherClientError(id string) error {
+	return fmt.Errorf(
+		"the client with id %q in Rauthy is not the one this resource created (its secret differs: it was "+
+			"recreated or its secret was rotated outside this provider), so it is not managed; delete that "+
+			"client in Rauthy to let this resource create its own again, or delete this Client, which leaves "+
+			"the Rauthy client alone: %w",
 		id, ErrAdoption,
 	)
 }

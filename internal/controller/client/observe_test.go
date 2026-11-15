@@ -53,7 +53,10 @@ func TestObserve(t *testing.T) {
 		reason string
 		cr     *v1alpha1.Client
 		server *rauthy.ClientResponse
-		want   want
+		// serverSecret, when set, is the secret of the stored client instead
+		// of fakeSecret.
+		serverSecret string
+		want         want
 	}{
 		"NotCreatedNotFound": {
 			reason: "A resource that created nothing and finds nothing asks for a create.",
@@ -100,6 +103,67 @@ func TestObserve(t *testing.T) {
 			want: want{
 				err:   errors.New("holds no ownership record for it"),
 				calls: []string{"GET /clients/app"},
+			},
+		},
+		"RecreatedWithAnotherSecret": {
+			reason:       "A client with the recorded id but another secret is not ours: nothing is published.",
+			cr:           newClient(owned),
+			server:       existing(true),
+			serverSecret: "third-party-secret",
+			want: want{
+				err:   errors.New("is not the one this resource created"),
+				calls: []string{"GET /clients/app", "POST /clients/app/secret"},
+			},
+		},
+		"ConfidentialRecordWithoutFingerprint": {
+			reason: "A record without a fingerprint for a confidential client is not ownership.",
+			cr: func() *v1alpha1.Client {
+				cr := newClient(owned)
+				cr.Status.Ownership.SecretFingerprint = ""
+				return cr
+			}(),
+			server: existing(true),
+			want: want{
+				err:   errors.New("is not the one this resource created"),
+				calls: []string{"GET /clients/app"},
+			},
+		},
+		"FingerprintedRecordButPublicClient": {
+			reason: "A record made for a confidential client does not match a public client with the id.",
+			cr: func() *v1alpha1.Client {
+				cr := newClient(owned)
+				cr.Spec.ForProvider.Confidential = false
+				return cr
+			}(),
+			server: existing(false),
+			want: want{
+				err:   errors.New("is not the one this resource created"),
+				calls: []string{"GET /clients/app"},
+			},
+		},
+		"DeletingMismatchFinalizesWithoutTouching": {
+			reason:       "A resource being deleted whose record names another client lets go of it untouched.",
+			cr:           newClient(owned, deleting),
+			server:       existing(true),
+			serverSecret: "third-party-secret",
+			want: want{
+				obs:   managed.ExternalObservation{ResourceExists: false},
+				calls: []string{"GET /clients/app", "POST /clients/app/secret"},
+			},
+		},
+		"ConfidentialChanged": {
+			reason: "Confidentiality cannot change after creation: refused before any update.",
+			cr: func() *v1alpha1.Client {
+				cr := newClient(owned)
+				ownership := cr.Status.Ownership
+				cr.Spec.ForProvider.Confidential = false
+				cr.Status.Ownership = ownership
+				return cr
+			}(),
+			server: existing(true),
+			want: want{
+				err:   errors.New("confidential cannot change after creation"),
+				calls: []string{"GET /clients/app", "POST /clients/app/secret"},
 			},
 		},
 		"OwnedConfidentialUpToDate": {
@@ -223,7 +287,7 @@ func TestObserve(t *testing.T) {
 			server: existing(true),
 			want: want{
 				obs:   managed.ExternalObservation{ResourceExists: true, ResourceUpToDate: true},
-				calls: []string{"GET /clients/app"},
+				calls: []string{"GET /clients/app", "POST /clients/app/secret"},
 			},
 		},
 		"DeletingNotOwned": {
@@ -238,7 +302,7 @@ func TestObserve(t *testing.T) {
 			server: existing(true),
 			want: want{
 				obs:   managed.ExternalObservation{ResourceExists: true, ResourceUpToDate: true},
-				calls: []string{"GET /clients/app"},
+				calls: []string{"GET /clients/app", "POST /clients/app/secret"},
 			},
 		},
 	}
@@ -247,7 +311,10 @@ func TestObserve(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			f := newFakeRauthy(t)
-			if tc.server != nil {
+			switch {
+			case tc.server != nil && tc.serverSecret != "":
+				f.putWithSecret(tc.server, tc.serverSecret)
+			case tc.server != nil:
 				f.put(tc.server)
 			}
 			e := newExternal(t, f, tc.cr)
@@ -325,8 +392,10 @@ func TestStaleCachedOwnershipIsNotTrusted(t *testing.T) {
 		t.Errorf("Delete: %v", err)
 	}
 
-	if diff := cmp.Diff([]string{"GET /clients/app"}, f.callLog()); diff != "" {
-		t.Errorf("Rauthy calls: -want, +got:\n%s", diff)
+	for _, c := range f.callLog() {
+		if c != "GET /clients/app" {
+			t.Errorf("acted on a client through a stale record: %s", c)
+		}
 	}
 	if diff := cmp.Diff(foreign, f.stored()); diff != "" {
 		t.Errorf("the foreign client changed: -want, +got:\n%s", diff)

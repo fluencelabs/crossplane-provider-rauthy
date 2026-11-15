@@ -2,6 +2,8 @@ package client_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"testing"
 	"time"
 
@@ -45,16 +47,35 @@ func newClient(mods ...func(*v1alpha1.Client)) *v1alpha1.Client {
 	for _, m := range mods {
 		m(cr)
 	}
+	// owned may run before public: a public client's record has no
+	// fingerprint.
+	if cr.Status.Ownership != nil && !cr.Spec.ForProvider.Confidential {
+		cr.Status.Ownership.SecretFingerprint = ""
+	}
 	return cr
 }
 
 // owned records in status that the resource created its client, as Create
 // leaves it.
+//
+// A confidential client is bound to fakeSecret, the secret the fake gives
+// clients stored with put.
 func owned(cr *v1alpha1.Client) {
 	cr.Status.Ownership = &v1alpha1.ClientOwnership{
 		ClientID:  meta.GetExternalName(cr),
 		CreatedAt: metav1.NewTime(time.Now().Add(-time.Minute)),
 	}
+	if cr.Spec.ForProvider.Confidential {
+		cr.Status.Ownership.SecretFingerprint = fingerprintOf(meta.GetExternalName(cr), fakeSecret)
+	}
+}
+
+// fingerprintOf computes the documented binding independently of the code
+// under test: hex SHA-256 of "rauthy-client-secret-v1", id and secret joined
+// by NUL bytes.
+func fingerprintOf(id, secret string) string {
+	sum := sha256.Sum256([]byte("rauthy-client-secret-v1\x00" + id + "\x00" + secret))
+	return hex.EncodeToString(sum[:])
 }
 
 // forged puts on the object every annotation a successful create leaves,

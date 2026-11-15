@@ -4,25 +4,32 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	"github.com/go-logr/logr/funcr"
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
 	kube "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	"github.com/fluencelabs/rauthy-go"
 
 	"github.com/fluencelabs/crossplane-provider-rauthy/apis/v1alpha1"
 	"github.com/fluencelabs/crossplane-provider-rauthy/internal/controller/client"
@@ -53,6 +60,49 @@ type harness struct {
 	cache *staleCache
 	r     *managed.Reconciler
 	key   kube.ObjectKey
+	// events and logs capture what the reconciler tells the world.
+	events *record.FakeRecorder
+	logs   *logSink
+}
+
+// logSink collects debug-level log lines.
+type logSink struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *logSink) add(prefix, args string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, prefix+" "+args)
+}
+
+func (l *logSink) all() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return strings.Join(l.lines, "\n")
+}
+
+// told returns every event, condition message and log line so far.
+func (h *harness) told(t *testing.T) string {
+	t.Helper()
+	var b strings.Builder
+	for {
+		select {
+		case e := <-h.events.Events:
+			b.WriteString(e + "\n")
+			continue
+		default:
+		}
+		break
+	}
+	if got := h.reconcile(t, 0); got != nil {
+		for _, c := range got.Status.Conditions {
+			b.WriteString(c.Message + "\n")
+		}
+	}
+	b.WriteString(h.logs.all())
+	return b.String()
 }
 
 // staleCache stands in for the manager's informer-backed client. While stale
@@ -101,10 +151,16 @@ func newHarness(t *testing.T, f *fakeRauthy, cr *v1alpha1.Client, intercept ...i
 		Reader: k,
 		Usage:  resource.NewProviderConfigUsageTracker(cache, &v1alpha1.ProviderConfigUsage{}),
 	}
-	opts := append(client.ReconcilerOptions(c), managed.WithManagementPolicies())
+	events := record.NewFakeRecorder(1000)
+	logs := &logSink{}
+	opts := append(client.ReconcilerOptions(c),
+		managed.WithManagementPolicies(),
+		managed.WithRecorder(event.NewAPIRecorder(events)),
+		managed.WithLogger(logging.NewLogrLogger(funcr.New(logs.add, funcr.Options{Verbosity: 1}))),
+	)
 	r := managed.NewReconciler(fakeManager{client: cache, scheme: s},
 		resource.ManagedKind(v1alpha1.ClientGroupVersionKind), opts...)
-	return &harness{kube: k, cache: cache, r: r, key: kube.ObjectKeyFromObject(cr)}
+	return &harness{kube: k, cache: cache, r: r, key: kube.ObjectKeyFromObject(cr), events: events, logs: logs}
 }
 
 // reconcile runs n reconciles and returns the Client as stored afterwards, or
@@ -177,7 +233,7 @@ func TestReconcilerCreateUpdateReady(t *testing.T) {
 		t.Errorf("Rauthy client = %+v, want accessTokenLifetime 600", c)
 	}
 	s := h.connectionSecret(t)
-	if s == nil || string(s.Data[client.ConnectionKeyClientSecret]) != fakeSecret ||
+	if s == nil || string(s.Data[client.ConnectionKeyClientSecret]) != f.secretOf() ||
 		string(s.Data[client.ConnectionKeyClientID]) != testID {
 		t.Errorf("connection Secret = %+v, want the client id and secret", s)
 	}
@@ -434,5 +490,184 @@ func TestReconcilerCRDWithoutOwnershipStopsCreating(t *testing.T) {
 	}
 	if msg := got.GetCondition(xpv2.TypeSynced).Message; !strings.Contains(msg, "does not keep status.ownership") {
 		t.Errorf("Synced message = %q, want the CRD named", msg)
+	}
+}
+
+// recreate makes the reported window real: the owned client is deleted in
+// Rauthy out of band and a third party creates one with the same id and its
+// own secret before the provider sees the gap. The record still names the id.
+func recreate(f *fakeRauthy) *rauthy.ClientResponse {
+	f.deleteStored()
+	foreign := existing(true)
+	f.putWithSecret(foreign, "third-party-secret")
+	return foreign
+}
+
+func TestReconcilerRecreatedClientIsNotAdopted(t *testing.T) {
+	t.Parallel()
+
+	for name, stale := range map[string]bool{"FreshCache": false, "StaleCache": true} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeRauthy(t)
+			h := newHarness(t, f, newClient())
+			if got := h.reconcile(t, 5); conditionStatus(got, xpv2.TypeReady) != "True" {
+				t.Fatalf("setup: Ready = %q, want True", conditionStatus(got, xpv2.TypeReady))
+			}
+			ours := f.secretOf()
+			before := h.reconcile(t, 0)
+
+			foreign := recreate(f)
+			if stale {
+				h.cache.stale = before
+			}
+			f.resetCalls()
+			h.reconcile(t, 3)
+			h.cache.stale = nil
+			got := h.reconcile(t, 1)
+
+			checkRecreatedRefused(t, h, f, got, ours, before.Status.Ownership.SecretFingerprint)
+			checkFinalizesUntouched(t, h, f, got, foreign)
+		})
+	}
+}
+
+func checkRecreatedRefused(t *testing.T, h *harness, f *fakeRauthy, got *v1alpha1.Client, ours, fingerprint string) {
+	t.Helper()
+	if msg := got.GetCondition(
+		xpv2.TypeSynced,
+	).Message; !strings.Contains(
+		msg,
+		"is not the one this resource created",
+	) {
+		t.Errorf("Synced message = %q, want the mismatch explained", msg)
+	}
+	if s := h.connectionSecret(t); s == nil || string(s.Data[client.ConnectionKeyClientSecret]) != ours {
+		t.Error("the connection Secret no longer holds this resource's own secret")
+	}
+	for _, c := range f.callLog() {
+		if c != "GET /clients/app" && c != "POST /clients/app/secret" {
+			t.Errorf("acted on the recreated client: %s", c)
+		}
+	}
+	told := h.told(t)
+	for _, leak := range []string{fingerprint, ours, "third-party-secret", fingerprintOf(testID, "third-party-secret")} {
+		if strings.Contains(told, leak) {
+			t.Errorf("events, conditions or logs carry a secret or a fingerprint: %q", leak)
+		}
+	}
+}
+
+// checkFinalizesUntouched deletes the resource and checks that it lets go of
+// the foreign client without touching it.
+func checkFinalizesUntouched(
+	t *testing.T,
+	h *harness,
+	f *fakeRauthy,
+	got *v1alpha1.Client,
+	foreign *rauthy.ClientResponse,
+) {
+	t.Helper()
+	// The runtime waits out its creation grace period before it trusts that
+	// nothing of ours exists, so age the create first.
+	h.ageCreate(t)
+	if err := h.kube.Delete(context.Background(), got); err != nil {
+		t.Fatal(err)
+	}
+	if after := h.reconcile(t, 3); after != nil {
+		t.Errorf("the Client was not finalized: %+v", after.Status.Conditions)
+	}
+	if diff := cmp.Diff(foreign, f.stored()); diff != "" {
+		t.Errorf("the foreign client changed: -want, +got:\n%s", diff)
+	}
+	for _, c := range f.callLog() {
+		if strings.HasPrefix(c, "DELETE") || strings.HasPrefix(c, "PUT") {
+			t.Errorf("acted on the recreated client: %s", c)
+		}
+	}
+}
+
+func TestReconcilerRotatedSecretIsNotAdopted(t *testing.T) {
+	t.Parallel()
+	f := newFakeRauthy(t)
+	h := newHarness(t, f, newClient(func(cr *v1alpha1.Client) {
+		cr.Spec.ForProvider.AccessTokenLifetime = new(int64(600))
+	}))
+	if got := h.reconcile(t, 5); conditionStatus(got, xpv2.TypeReady) != "True" {
+		t.Fatalf("setup: Ready = %q, want True", conditionStatus(got, xpv2.TypeReady))
+	}
+
+	f.rotate()
+	f.resetCalls()
+	got := h.reconcile(t, 2)
+
+	if msg := got.GetCondition(xpv2.TypeSynced).Message; !strings.Contains(msg, "its secret was rotated outside") {
+		t.Errorf("Synced message = %q, want the mismatch explained", msg)
+	}
+	if s := h.connectionSecret(t); s != nil && string(s.Data[client.ConnectionKeyClientSecret]) == "rotated-secret" {
+		t.Error("the rotated secret was published")
+	}
+	for _, c := range f.callLog() {
+		if c != "GET /clients/app" && c != "POST /clients/app/secret" {
+			t.Errorf("acted on the rotated client: %s", c)
+		}
+	}
+}
+
+func TestReconcilerPublicClient(t *testing.T) {
+	t.Parallel()
+	f := newFakeRauthy(t)
+	h := newHarness(t, f, newClient(public, func(cr *v1alpha1.Client) {
+		cr.Spec.ForProvider.Challenges = []string{"S256"}
+	}))
+
+	got := h.reconcile(t, 5)
+
+	if conditionStatus(got, xpv2.TypeReady) != "True" {
+		t.Fatalf("conditions %+v; want Ready", got.Status.Conditions)
+	}
+	if got.Status.Ownership == nil || got.Status.Ownership.SecretFingerprint != "" {
+		t.Errorf("record = %+v, want the id and no fingerprint", got.Status.Ownership)
+	}
+	s := h.connectionSecret(t)
+	if s == nil || len(s.Data[client.ConnectionKeyClientSecret]) != 0 ||
+		string(s.Data[client.ConnectionKeyClientID]) != testID {
+		t.Errorf("connection Secret = %+v, want the id without a secret", s)
+	}
+	for _, c := range f.callLog() {
+		if strings.HasSuffix(c, "/secret") {
+			t.Errorf("a public client's secret was asked for: %s", c)
+		}
+	}
+}
+
+func TestReconcilerConfidentialFlipRefused(t *testing.T) {
+	t.Parallel()
+	f := newFakeRauthy(t)
+	h := newHarness(t, f, newClient())
+	got := h.reconcile(t, 5)
+	if conditionStatus(got, xpv2.TypeReady) != "True" {
+		t.Fatalf("setup: Ready = %q, want True", conditionStatus(got, xpv2.TypeReady))
+	}
+
+	// The CRD refuses this change; the fake API server does not enforce CEL,
+	// which is the case the controller check covers.
+	got.Spec.ForProvider.Confidential = false
+	if err := h.kube.Update(context.Background(), got); err != nil {
+		t.Fatal(err)
+	}
+	f.resetCalls()
+	got = h.reconcile(t, 2)
+
+	if msg := got.GetCondition(xpv2.TypeSynced).Message; !strings.Contains(msg, "confidential cannot change") {
+		t.Errorf("Synced message = %q, want the change refused", msg)
+	}
+	for _, c := range f.callLog() {
+		if strings.HasPrefix(c, "PUT") {
+			t.Errorf("the change reached Rauthy: %s", c)
+		}
+	}
+	if c := f.stored(); c == nil || !c.Confidential {
+		t.Errorf("Rauthy client = %+v, want it still confidential", c)
 	}
 }

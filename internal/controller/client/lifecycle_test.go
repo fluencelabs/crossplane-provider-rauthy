@@ -3,6 +3,8 @@ package client_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
@@ -37,12 +39,14 @@ func TestCreate(t *testing.T) {
 	}
 
 	cases := map[string]struct {
-		reason    string
-		cr        *v1alpha1.Client
-		server    *rauthy.ClientResponse
-		failPost  bool
-		failDel   bool
-		intercept *interceptor.Funcs
+		reason   string
+		cr       *v1alpha1.Client
+		server   *rauthy.ClientResponse
+		failPost bool
+		failDel  bool
+		// failSecret makes every secret read fail.
+		failSecret bool
+		intercept  *interceptor.Funcs
 		// readerFails makes every uncached read fail.
 		readerFails bool
 		// cancelOnPatch cancels the reconcile context inside the status
@@ -58,7 +62,7 @@ func TestCreate(t *testing.T) {
 		"PostOnly": {
 			reason:      "Create issues only the POST and records ownership in status.",
 			cr:          newClient(),
-			wantCalls:   []string{"POST /clients"},
+			wantCalls:   []string{"POST /clients", "POST /clients/app/secret"},
 			wantOwnedID: testID,
 			wantRemain:  true,
 		},
@@ -94,7 +98,7 @@ func TestCreate(t *testing.T) {
 			cr:        newClient(),
 			intercept: &statusFails,
 			wantErr:   errors.New("was deleted again and will be recreated"),
-			wantCalls: []string{"POST /clients", "DELETE /clients/app"},
+			wantCalls: []string{"POST /clients", "POST /clients/app/secret", "DELETE /clients/app"},
 		},
 		"OwnershipNotRecordedNoRollback": {
 			reason:     "If the rollback fails too, the error says what a human must delete.",
@@ -102,14 +106,14 @@ func TestCreate(t *testing.T) {
 			intercept:  &statusFails,
 			failDel:    true,
 			wantErr:    errors.New(`delete client "app" in Rauthy to retry`),
-			wantCalls:  []string{"POST /clients", "DELETE /clients/app"},
+			wantCalls:  []string{"POST /clients", "POST /clients/app/secret", "DELETE /clients/app"},
 			wantRemain: true,
 		},
 		"RecordAppliedDespiteError": {
 			reason:      "A patch that landed but answered with an error is confirmed by a re-read: created, no rollback.",
 			cr:          newClient(),
 			intercept:   &appliedThenFails,
-			wantCalls:   []string{"POST /clients"},
+			wantCalls:   []string{"POST /clients", "POST /clients/app/secret"},
 			wantOwnedID: testID,
 			wantRemain:  true,
 		},
@@ -119,7 +123,7 @@ func TestCreate(t *testing.T) {
 			intercept:   &statusFails,
 			readerFails: true,
 			wantErr:     errors.New("outcome of recording its ownership is unknown"),
-			wantCalls:   []string{"POST /clients"},
+			wantCalls:   []string{"POST /clients", "POST /clients/app/secret"},
 			wantRemain:  true,
 		},
 		"RollbackSurvivesExpiredContext": {
@@ -127,7 +131,14 @@ func TestCreate(t *testing.T) {
 			cr:            newClient(),
 			cancelOnPatch: true,
 			wantErr:       errors.New("was deleted again and will be recreated"),
-			wantCalls:     []string{"POST /clients", "DELETE /clients/app"},
+			wantCalls:     []string{"POST /clients", "POST /clients/app/secret", "DELETE /clients/app"},
+		},
+		"SecretUnreadableRollsBack": {
+			reason:     "Without the new client's secret there is no binding: the client is deleted again.",
+			cr:         newClient(),
+			failSecret: true,
+			wantErr:    errors.New("cannot read the secret of the new client"),
+			wantCalls:  []string{"POST /clients", "POST /clients/app/secret", "DELETE /clients/app"},
 		},
 		"InvalidID": {
 			reason:  "An invalid id fails before any request.",
@@ -140,7 +151,7 @@ func TestCreate(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			f := newFakeRauthy(t)
-			f.failPost, f.failDelete = tc.failPost, tc.failDel
+			f.failPost, f.failDelete, f.failSecret = tc.failPost, tc.failDel, tc.failSecret
 			if tc.server != nil {
 				f.put(tc.server)
 			}
@@ -276,8 +287,10 @@ func TestUpdateRefusesForeignClient(t *testing.T) {
 	if err == nil {
 		t.Fatal("Update of a client this resource did not create succeeded")
 	}
-	if calls := f.callLog(); len(calls) != 0 {
-		t.Errorf("Update of a foreign client talked to Rauthy: %v", calls)
+	for _, c := range f.callLog() {
+		if c != "GET /clients/app" {
+			t.Errorf("Update of a foreign client did more than read it: %s", c)
+		}
 	}
 }
 
@@ -295,18 +308,19 @@ func TestDelete(t *testing.T) {
 			reason:    "An owned client is deleted.",
 			cr:        newClient(owned, deleting),
 			server:    existing(true),
-			wantCalls: []string{"DELETE /clients/app"},
+			wantCalls: []string{"GET /clients/app", "POST /clients/app/secret", "DELETE /clients/app"},
 		},
 		"NotOwned": {
 			reason:     "A client this resource did not create is never deleted, whatever its annotations say.",
 			cr:         newClient(forged, deleting),
 			server:     existing(true),
+			wantCalls:  []string{"GET /clients/app"},
 			wantRemain: true,
 		},
 		"AlreadyGone": {
-			reason:    "A 404 on delete is success.",
+			reason:    "A client that is already gone needs no delete.",
 			cr:        newClient(owned, deleting),
-			wantCalls: []string{"DELETE /clients/app"},
+			wantCalls: []string{"GET /clients/app"},
 		},
 	}
 
@@ -433,4 +447,67 @@ func createClients(
 		})
 	}
 	return base, k, reader
+}
+
+func TestCreateRecordsBinding(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("Confidential", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeRauthy(t)
+		cr := newClient()
+		k := newKube(t, cr)
+		if _, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Create(ctx, cr); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		got := &v1alpha1.Client{}
+		if err := k.Get(ctx, kube.ObjectKeyFromObject(cr), got); err != nil {
+			t.Fatal(err)
+		}
+		want := fingerprintOf(testID, f.secretOf())
+		if got.Status.Ownership == nil || got.Status.Ownership.SecretFingerprint != want {
+			t.Errorf("stored record = %+v, want the fingerprint of the issued secret", got.Status.Ownership)
+		}
+		if strings.Contains(fmt.Sprintf("%+v", got.Status), f.secretOf()) {
+			t.Error("the secret itself is stored in status")
+		}
+	})
+
+	t.Run("Public", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeRauthy(t)
+		cr := newClient(public)
+		k := newKube(t, cr)
+		if _, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Create(ctx, cr); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if diff := cmp.Diff([]string{"POST /clients"}, f.callLog()); diff != "" {
+			t.Errorf("a public client's create reads no secret: -want, +got:\n%s", diff)
+		}
+		if got := inMemoryOwnership(cr); got != testID || cr.Status.Ownership.SecretFingerprint != "" {
+			t.Errorf("record = %+v, want the id and no fingerprint", cr.Status.Ownership)
+		}
+	})
+}
+
+func TestUpdateRefusesConfidentialFlip(t *testing.T) {
+	t.Parallel()
+	f := newFakeRauthy(t)
+	f.put(existing(true))
+	cr := newClient(owned)
+	ownership := cr.Status.Ownership
+	cr.Spec.ForProvider.Confidential = false
+	cr.Status.Ownership = ownership
+	k := newKube(t, cr)
+
+	_, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Update(context.Background(), cr)
+
+	checkErr(t, "Update refuses a change of confidentiality", err,
+		errors.New("confidential cannot change after creation"), nil)
+	for _, c := range f.callLog() {
+		if strings.HasPrefix(c, "PUT") {
+			t.Errorf("confidentiality change reached Rauthy: %s", c)
+		}
+	}
 }

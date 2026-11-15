@@ -2,6 +2,7 @@ package client_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,7 +20,13 @@ const fakeSecret = "s3cr3t-value"
 type fakeRauthy struct {
 	mu      sync.Mutex
 	clients map[string]*rauthy.ClientResponse
-	calls   []string
+	// secrets holds the secret of each confidential client. Clients created
+	// through POST get a fresh one; clients stored with put get fakeSecret.
+	secrets map[string]string
+	created int
+	// failSecret makes every secret read answer 500.
+	failSecret bool
+	calls      []string
 	// failPut makes every PUT answer 400.
 	failPut bool
 	// failPost makes every POST answer 500 without creating anything.
@@ -38,7 +45,7 @@ type fakeRauthy struct {
 
 func newFakeRauthy(t *testing.T) *fakeRauthy {
 	t.Helper()
-	f := &fakeRauthy{clients: map[string]*rauthy.ClientResponse{}}
+	f := &fakeRauthy{clients: map[string]*rauthy.ClientResponse{}, secrets: map[string]string{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
 	return f
@@ -55,10 +62,31 @@ func (f *fakeRauthy) api(t *testing.T) *rauthy.Client {
 
 // put stores a client directly, as if somebody had created it in Rauthy.
 func (f *fakeRauthy) put(c *rauthy.ClientResponse) {
+	f.putWithSecret(c, fakeSecret)
+}
+
+// putWithSecret stores a client with the given secret, as if somebody had
+// created it in Rauthy.
+func (f *fakeRauthy) putWithSecret(c *rauthy.ClientResponse, secret string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	cp := *c
 	f.clients[c.ID] = &cp
+	f.secrets[c.ID] = secret
+}
+
+// secretOf returns the test client's current secret.
+func (f *fakeRauthy) secretOf() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.secrets[testID]
+}
+
+// rotate gives the test client a new secret, as the Rauthy UI does.
+func (f *fakeRauthy) rotate() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.secrets[testID] = "rotated-secret"
 }
 
 // stored returns the test client as Rauthy holds it, or nil.
@@ -83,6 +111,7 @@ func (f *fakeRauthy) deleteStored() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.clients, testID)
+	delete(f.secrets, testID)
 }
 
 func (f *fakeRauthy) resetCalls() {
@@ -140,6 +169,7 @@ func (f *fakeRauthy) create(w http.ResponseWriter, r *http.Request) {
 		cp := *f.raceOnPost
 		cp.ID = req.ID
 		f.clients[req.ID] = &cp
+		f.secrets[req.ID] = "third-party-secret"
 		f.raceOnPost = nil
 	}
 	if _, exists := f.clients[req.ID]; exists {
@@ -165,6 +195,8 @@ func (f *fakeRauthy) create(w http.ResponseWriter, r *http.Request) {
 		c.Challenges = []string{"S256"}
 	}
 	f.clients[req.ID] = c
+	f.created++
+	f.secrets[req.ID] = fmt.Sprintf("created-secret-%d", f.created)
 	if f.commitThenFail {
 		writeError(w, http.StatusInternalServerError, "connection reset")
 		return
@@ -189,6 +221,7 @@ func (f *fakeRauthy) byID(w http.ResponseWriter, r *http.Request, id string) {
 			return
 		}
 		delete(f.clients, id)
+		delete(f.secrets, id)
 		w.WriteHeader(http.StatusOK)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "unsupported")
@@ -244,9 +277,13 @@ func (f *fakeRauthy) secret(w http.ResponseWriter, id string) {
 		writeError(w, http.StatusNotFound, "client not found")
 		return
 	}
+	if f.failSecret {
+		writeError(w, http.StatusInternalServerError, "database unavailable")
+		return
+	}
 	resp := rauthy.ClientSecretResponse{ID: id, Confidential: c.Confidential}
 	if c.Confidential {
-		s := fakeSecret
+		s := f.secrets[id]
 		resp.Secret = &s
 	}
 	writeJSON(w, resp)
