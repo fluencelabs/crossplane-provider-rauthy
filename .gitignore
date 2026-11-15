@@ -1,0 +1,13 @@
+.direnv/
+.envrc.local
+.worktrees/
+
+# Go
+/bin/
+*.test
+*.out
+coverage.*
+
+# Build output: binaries, image tarballs and packages.
+/_output/
+*.xpkg
