@@ -39,9 +39,9 @@ spec:
           (the crossplane.io/external-name annotation), which defaults to
           metadata.name and cannot change once the client exists.
 
-          A Client only ever manages a Rauthy client it created itself: if a client
-          with the same id already exists in Rauthy, the resource reports an error
-          instead of taking it over.
+          A Client only ever manages a Rauthy client it created itself, as recorded in
+          status.ownership: if a client with the same id already exists in Rauthy, the
+          resource reports an error instead of taking it over.
         properties:
           apiVersion:
             description: |-
@@ -130,8 +130,13 @@ spec:
                   confidential:
                     description: |-
                       Confidential clients authenticate with a secret that Rauthy generates.
-                      A public client has no secret and must use S256 PKCE.
+                      A public client has no secret and must use S256 PKCE. Immutable: the
+                      ownership record is bound to the secret, so a client cannot switch
+                      between confidential and public after creation.
                     type: boolean
+                    x-kubernetes-validations:
+                    - message: confidential is immutable
+                      rule: self == oldSelf
                   contacts:
                     description: Contacts of the application's maintainers.
                     items:
@@ -407,6 +412,29 @@ spec:
                   it can not recover from without human intervention.
                 format: int64
                 type: integer
+              ownership:
+                description: Ownership is set once this resource has created its Rauthy
+                  client.
+                properties:
+                  clientID:
+                    description: ClientID is the id of the Rauthy client this resource
+                      created.
+                    type: string
+                  createdAt:
+                    description: CreatedAt is when the provider created the client.
+                    format: date-time
+                    type: string
+                  secretFingerprint:
+                    description: |-
+                      SecretFingerprint binds the record to the client's secret: the hex
+                      SHA-256 of "rauthy-client-secret-v1", the client id and the secret
+                      Rauthy issued, separated by NUL bytes. Empty for a public client, which
+                      has no secret. The secret itself is never stored.
+                    type: string
+                required:
+                - clientID
+                - createdAt
+                type: object
             type: object
         required:
         - spec

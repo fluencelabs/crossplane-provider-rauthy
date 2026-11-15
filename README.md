@@ -33,41 +33,154 @@ rejected by the API server.
 **The provider never takes over, modifies or deletes a Rauthy client it did not
 create.** A `Client` manages exactly the Rauthy client it created itself:
 
-- If a client with the same id already exists in Rauthy, the `Client` reports
-  `client "<id>" already exists in Rauthy and was not created by this resource;
-  adoption is not supported` and does nothing else: it does not mark the
-  resource as existing, does not update the client and does not publish its
-  secret. This holds whether the existing client is found while observing or
-  when the create request is refused.
+- If a client with the same id already exists in Rauthy and the `Client`
+  holds no ownership record for it, the `Client` reports `a client with id
+  "<id>" exists in Rauthy and this resource holds no ownership record for it,
+  so it is not managed; if an interrupted create of this resource made it,
+  delete it in Rauthy to retry, otherwise choose another id` and does nothing
+  else: it does not mark the resource as existing, does not update the client
+  and does not publish its secret. This one message is used whatever the
+  reason; the provider cannot tell a stranger's client from one its own
+  interrupted create left behind, so check before deleting anything.
 - Deleting a `Client` deletes only a Rauthy client it created. A `Client` that
   never created anything (for example one stuck on the error above) is deleted
   without touching Rauthy.
-- Management policies that cannot create, such as `["Observe"]`, would only
-  ever observe a client created elsewhere, which is an import. They are refused
-  with the same error until the resource has created its own client. A
-  resource that did create its client may switch to such policies later.
+- Management policies must include `Update` (or `*`): a new client only gets
+  most of its configuration through an update, so without it the client could
+  never match the spec. Until the resource has created its client they must
+  also include `Create`; without it the resource could only observe a client
+  created elsewhere, which is an import. Other policy sets are refused with an
+  error naming the missing action. Policies are not checked while a `Client`
+  is being deleted.
 - The client id is fixed once the client exists. Changing the external name of
   a `Client` that owns a Rauthy client is reported as an error rather than
   pointing the resource at a different client.
 
-Ownership is recorded on the `Client` itself: the runtime's
-`crossplane.io/external-create-succeeded` annotation, newer than any later
-create attempt, together with `rauthy.fluence.dev/created-client-id`, which the
-provider writes in the same update. Copying these annotations onto another
-resource transfers ownership, so treat them as part of the resource.
+### What counts as ownership
 
-Two situations need a human:
+The only evidence is `status.ownership` on the `Client`, as the API server
+holds it: `clientID`, `createdAt` and, for a confidential client,
+`secretFingerprint`. The provider writes it through the status subresource
+immediately after Rauthy accepts the create. Annotations, including
+Crossplane's `crossplane.io/external-create-*` marks, influence neither what
+the provider does nor what it reports.
 
-- **Interrupted create.** If the provider stops after Rauthy accepted the
-  create but before the result was recorded, crossplane-runtime refuses to
-  continue (`cannot determine creation result`). The provider cannot prove the
-  client is its own, so it does not guess: check the client in Rauthy, delete
-  it there if it is the one this resource made, and remove the
-  `crossplane.io/external-create-pending` annotation.
-- **A client deleted out of band and recreated by someone else with the same
-  id.** Rauthy keeps no record of who created a client, so a resource that once
-  created a client cannot tell it apart from a stranger's client with the same
-  id that appeared later. Avoid reusing client ids across owners.
+**The record is bound to the client's secret.** For a confidential client,
+`secretFingerprint` is the hex SHA-256 of `rauthy-client-secret-v1`, the
+client id and the secret Rauthy issued at creation, separated by NUL bytes.
+The secret itself is never stored, logged or put in an event or condition.
+A `Client` owns a Rauthy client when the record names its external name and,
+for a confidential client, the fingerprint of the client's current secret
+matches. A client with the right id but another secret is not the client the
+record was made for.
+
+- **Rotating a client's secret in the Rauthy UI orphans it from the provider,
+  by design**: the provider can no longer tell it from a client somebody else
+  created with the same id, so it stops managing it (state S2' below).
+- **A public client has no secret.** Its binding is the id alone, so a public
+  client deleted and recreated by someone else with the same id is still
+  taken for the resource's own.
+- **`confidential` is immutable** (enforced by the CRD and by the
+  controller): switching would change the binding. Delete and recreate the
+  `Client` to switch.
+
+Before it acts as the owner (reports the client as existing, reads or
+publishes its secret, updates or deletes it), the provider re-reads the
+`Client` straight from the API server, bypassing its cache, requires the
+record there on the same object (same UID), and checks the fingerprint. A
+lagging cache can therefore delay the provider but never make it act on a
+client it does not own.
+
+The provider keeps one invariant: **a record names a client id only while
+this resource's client with that id exists in Rauthy.**
+
+| State | Record | Rauthy client | What happens |
+| ----- | ------ | ------------- | ------------ |
+| S0    | none   | none          | The client is created. |
+| S1    | none   | exists        | Refused: no ownership record (message above). |
+| S2    | id     | ours          | Owned: observed, updated, deleted. |
+| S2'   | id     | not ours      | Refused: the client with the id is not the one the record was made for (another secret, or public where the record has a fingerprint). Never published, updated or deleted. |
+| S3    | id     | none          | Transient: the record is cleared, confirmed, before anything else. |
+
+- **Create** (S0): the POST, then the secret is read and the record (id and
+  fingerprint) is written in one status patch. If the secret cannot be read,
+  the new client is deleted again. If writing the record fails, the provider
+  re-reads the `Client` without the cache: if the record landed anyway, the
+  client is kept (S2); if it did not, the new client is deleted again (back to
+  S0); if even the re-read fails, the client is neither deleted nor claimed,
+  and the next reconcile decides from a fresh read (S2 or S1). Re-reads and
+  the rollback run on their own bounded context, so an expired reconcile
+  deadline does not stop them.
+- **Delete** (S2): the DELETE, then the record is cleared at once.
+- **A client that disappears** (S2 to S3, by Delete or out of band): the next
+  observation clears the record and only then lets the resource create again
+  or finish deleting.
+- **S2'** reports `the client with id "<id>" in Rauthy is not the one this
+  resource created (its secret differs: it was recreated or its secret was
+  rotated outside this provider), so it is not managed`. The record is left
+  as it is. To recover, delete that client in Rauthy (S3, then the record is
+  cleared and the resource creates its own client again, with a new secret),
+  or delete the `Client`, which finalizes without touching the Rauthy client.
+
+What each interruption leaves: before the POST, S0; between the POST and the
+record, S1 (refused until someone deletes the client in Rauthy); after the
+record, S2; between a DELETE and clearing the record, S3, which the next
+reconcile repairs.
+
+Windows that remain:
+
+- **Closed for confidential clients**: a client deleted in Rauthy and
+  recreated by someone else with the same id while the record still exists
+  (S3 looking like S2) now lands in S2', because the new client's secret
+  differs.
+- **Public clients**: that window stays open; the binding is the id alone.
+- **Anyone who can write `clients/status`** can write any record, including
+  a fingerprint (see below).
+- **Anyone who knows a client's secret** can compute its fingerprint and, with
+  `clients/status` write access, forge a record for it.
+
+The API server ignores `status` when a `Client` is created or updated through
+the main resource, so a manifest cannot carry ownership. What it does rely on:
+
+- **Only the provider may write `clients/status`.** Anyone with write access to
+  the `clients/status` subresource of `rauthy.fluence.dev` can forge ownership
+  and so take over any Rauthy client, including its secret. Do not grant that
+  permission to anyone but the provider's service account. Crossplane's RBAC
+  manager can aggregate rules for provider resources into the built-in roles,
+  so check who holds it, for example with `kubectl auth can-i patch
+  clients.rauthy.fluence.dev --subresource=status -n NAMESPACE --as=USER`.
+- **Tenants should not create `Client` objects directly** if a platform
+  composes them. Ownership protects existing Rauthy clients, but a tenant who
+  can create a `Client` can still create new Rauthy clients with any id that is
+  free and any redirect URIs.
+- **Status is not backed up reliably.** Restoring a `Client` from a backup or
+  re-applying it from Git recreates it without `status.ownership`. The resource
+  then fails safe: it refuses its own client. To recover, either delete the
+  client in Rauthy, after which the resource creates it again (with a new
+  secret), or delete the `Client` (which leaves the Rauthy client alone) and
+  remove the client in Rauthy by hand.
+
+### When a create goes wrong
+
+The create call itself knows how it ended, and its error says so once:
+
+- **Rauthy refuses the create** (a 4xx answer) and a client with that id
+  exists: `client "<id>" already exists in Rauthy and was not created by this
+  resource; choose another id`.
+- **The create request fails ambiguously** (a timeout, a transport error or a
+  5xx answer) and a client with that id exists afterwards: `create outcome
+  unknown: the request failed but a client with id "<id>" now exists; verify
+  and delete it in Rauthy to retry`.
+- **Recording ownership fails**: see Create above. If the rollback DELETE
+  fails, the error names the client to delete in Rauthy by hand.
+- **The installed `Client` CRD is older** and silently drops
+  `status.ownership`: the new client is deleted again and the provider stops
+  creating clients, reporting that the CRD lacks the field, until it is
+  restarted with current CRDs. This avoids creating and deleting a client on
+  every reconcile.
+
+From the next reconcile on, every one of these shows the single message from
+the no-adoption rule above.
 
 ## Install
 
@@ -79,6 +192,11 @@ metadata:
 spec:
   package: ghcr.io/fluencelabs/crossplane-provider-rauthy:v0.1.0
 ```
+
+The package is pulled from GitHub Container Registry: either make the
+`crossplane-provider-rauthy` package public in the organisation's package
+settings, or give the `Provider` a pull secret with
+`spec.packagePullSecrets`.
 
 Create an API key in the Rauthy Admin UI (API Keys) with the `Clients` rights
 (create, read, update, delete) and `Secrets: read`, store it in the provider's
@@ -150,7 +268,8 @@ pattern: 2 to 256 letters, digits, `.`, `_` or `-`.
 | `issuer`        | every client             |
 | `client_secret` | confidential clients only |
 
-The secret is read from Rauthy on every observation and never logged.
+The secret is read from Rauthy on every observation, checked against the
+ownership record, and never logged.
 
 ## Field reference
 
@@ -160,7 +279,7 @@ and `redirectUris` are required.
 | Field                    | Type     | Notes                                                                      |
 | ------------------------ | -------- | -------------------------------------------------------------------------- |
 | `name`                   | string   | Display name on the login page.                                            |
-| `confidential`           | bool     | Required. A confidential client gets a secret generated by Rauthy.          |
+| `confidential`           | bool     | Required and immutable. A confidential client gets a secret generated by Rauthy. |
 | `enabled`                | bool     | Whether the client may be used to log in.                                  |
 | `redirectUris`           | []string | Required, at least one.                                                    |
 | `postLogoutRedirectUris` | []string |                                                                            |
@@ -228,7 +347,10 @@ Requires Go (the version in `go.mod`), Docker for images, and the
 
 The unit tests run the external client against an in-memory fake of the Rauthy
 API that behaves like the real server where it matters (the create call drops
-everything but the create fields, updates replace the whole client).
+everything but the create fields, updates replace the whole client). A second
+set of tests drives crossplane-runtime's real managed reconciler against a fake
+API server, to check that ownership recorded in status survives the runtime's
+own updates of the object.
 
 The upstream provider template's `build` submodule is not used; the plain
 `Makefile` above covers what this provider needs.

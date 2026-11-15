@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/controller"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
@@ -40,16 +41,16 @@ func SetupGated(mgr ctrl.Manager, o controller.Options) error {
 func Setup(mgr ctrl.Manager, o controller.Options) error {
 	name := managed.ControllerName(v1alpha1.ClientGroupKind)
 
-	opts := []managed.ReconcilerOption{
-		managed.WithTypedExternalConnector[*v1alpha1.Client](&Connector{
-			Kube:  mgr.GetClient(),
-			Usage: resource.NewProviderConfigUsageTracker(mgr.GetClient(), &v1alpha1.ProviderConfigUsage{}),
-		}),
+	opts := append(ReconcilerOptions(&Connector{
+		Kube:   mgr.GetClient(),
+		Reader: mgr.GetAPIReader(),
+		Usage:  resource.NewProviderConfigUsageTracker(mgr.GetClient(), &v1alpha1.ProviderConfigUsage{}),
+	}),
 		managed.WithLogger(o.Logger.WithValues("controller", name)),
 		managed.WithPollInterval(o.PollInterval),
 		//nolint:staticcheck // crossplane-runtime has not moved to the new events API yet.
 		managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))),
-	}
+	)
 	if o.Features.Enabled(feature.EnableBetaManagementPolicies) {
 		opts = append(opts, managed.WithManagementPolicies())
 	}
@@ -82,6 +83,18 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 	return nil
 }
 
+// ReconcilerOptions are the options every Client reconciler is built with;
+// Setup adds logging, events, metrics and feature flags on top.
+func ReconcilerOptions(c *Connector) []managed.ReconcilerOption {
+	return []managed.ReconcilerOption{
+		managed.WithTypedExternalConnector[*v1alpha1.Client](c),
+		// The client id is the external name, known before the create. An
+		// interrupted create is therefore safe to retry: status.ownership,
+		// not the runtime's create annotations, decides what is ours.
+		managed.WithDeterministicExternalName(true),
+	}
+}
+
 // UsageTracker records that a managed resource uses its provider config.
 type UsageTracker interface {
 	Track(ctx context.Context, mg resource.ModernManaged) error
@@ -89,8 +102,18 @@ type UsageTracker interface {
 
 // Connector builds an external client from a Client's ClusterProviderConfig.
 type Connector struct {
-	Kube  kube.Client
-	Usage UsageTracker
+	// Kube is the manager's (cached) client.
+	Kube kube.Client
+	// Reader reads from the API server without a cache; ownership is
+	// confirmed through it. Kube is used when it is nil, which is only right
+	// for a client that has no cache.
+	Reader kube.Reader
+	Usage  UsageTracker
+
+	// crd is shared by every external client of this connector: once the
+	// installed CRD is found to prune status.ownership, no further client is
+	// created until the provider restarts with current CRDs.
+	crd atomic.Bool
 }
 
 // Connect resolves the ClusterProviderConfig, reads the API key and returns a
@@ -130,5 +153,9 @@ func (c *Connector) Connect(
 	if err != nil {
 		return nil, fmt.Errorf("cannot build the Rauthy client: %w", err)
 	}
-	return NewExternal(api, issuerFor(pc.Spec.URL, pc.Spec.IssuerURL)), nil
+	reader := c.Reader
+	if reader == nil {
+		reader = c.Kube
+	}
+	return newExternal(api, c.Kube.Status(), reader, issuerFor(pc.Spec.URL, pc.Spec.IssuerURL), &c.crd), nil
 }

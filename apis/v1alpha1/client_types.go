@@ -22,7 +22,10 @@ type ClientParameters struct {
 	Name *string `json:"name,omitempty"`
 
 	// Confidential clients authenticate with a secret that Rauthy generates.
-	// A public client has no secret and must use S256 PKCE.
+	// A public client has no secret and must use S256 PKCE. Immutable: the
+	// ownership record is bound to the secret, so a client cannot switch
+	// between confidential and public after creation.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="confidential is immutable"
 	Confidential bool `json:"confidential"`
 
 	// Enabled controls whether the client may be used to log in.
@@ -162,11 +165,33 @@ type ClientSpec struct {
 	ForProvider ClientParameters `json:"forProvider"`
 }
 
+// ClientOwnership records the Rauthy client a Client created. The provider
+// writes it through the status subresource right after Rauthy accepted the
+// create, and treats it as the only evidence that the client is its own.
+type ClientOwnership struct {
+	// ClientID is the id of the Rauthy client this resource created.
+	ClientID string `json:"clientID"`
+
+	// CreatedAt is when the provider created the client.
+	CreatedAt metav1.Time `json:"createdAt"`
+
+	// SecretFingerprint binds the record to the client's secret: the hex
+	// SHA-256 of "rauthy-client-secret-v1", the client id and the secret
+	// Rauthy issued, separated by NUL bytes. Empty for a public client, which
+	// has no secret. The secret itself is never stored.
+	// +optional
+	SecretFingerprint string `json:"secretFingerprint,omitempty"`
+}
+
 // A ClientStatus represents the observed state of a Client.
 type ClientStatus struct {
 	xpv2.ManagedResourceStatus `json:",inline"`
 
 	AtProvider ClientObservation `json:"atProvider,omitempty"`
+
+	// Ownership is set once this resource has created its Rauthy client.
+	// +optional
+	Ownership *ClientOwnership `json:"ownership,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -175,9 +200,9 @@ type ClientStatus struct {
 // (the crossplane.io/external-name annotation), which defaults to
 // metadata.name and cannot change once the client exists.
 //
-// A Client only ever manages a Rauthy client it created itself: if a client
-// with the same id already exists in Rauthy, the resource reports an error
-// instead of taking it over.
+// A Client only ever manages a Rauthy client it created itself, as recorded in
+// status.ownership: if a client with the same id already exists in Rauthy, the
+// resource reports an error instead of taking it over.
 // +kubebuilder:printcolumn:name="READY",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 // +kubebuilder:printcolumn:name="SYNCED",type="string",JSONPath=".status.conditions[?(@.type=='Synced')].status"
 // +kubebuilder:printcolumn:name="EXTERNAL-NAME",type="string",JSONPath=".metadata.annotations.crossplane\\.io/external-name"

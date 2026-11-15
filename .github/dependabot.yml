@@ -4,6 +4,15 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # The Kubernetes libraries and the code generators must stay at the
+    # versions crossplane-runtime is built against. They move only when
+    # crossplane-runtime does: its bump raises them through go.mod's minimum
+    # version selection in the same pull request.
+    ignore:
+      - dependency-name: "k8s.io/*"
+      - dependency-name: "sigs.k8s.io/controller-runtime"
+      - dependency-name: "sigs.k8s.io/controller-tools"
+      - dependency-name: "github.com/crossplane/crossplane-tools"
   - package-ecosystem: github-actions
     directory: /
     schedule:

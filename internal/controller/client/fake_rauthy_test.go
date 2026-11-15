@@ -2,6 +2,7 @@ package client_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,18 +20,32 @@ const fakeSecret = "s3cr3t-value"
 type fakeRauthy struct {
 	mu      sync.Mutex
 	clients map[string]*rauthy.ClientResponse
-	calls   []string
+	// secrets holds the secret of each confidential client. Clients created
+	// through POST get a fresh one; clients stored with put get fakeSecret.
+	secrets map[string]string
+	created int
+	// failSecret makes every secret read answer 500.
+	failSecret bool
+	calls      []string
 	// failPut makes every PUT answer 400.
 	failPut bool
 	// failPost makes every POST answer 500 without creating anything.
 	failPost bool
-	authz    string
-	srv      *httptest.Server
+	// failDelete makes every DELETE answer 500.
+	failDelete bool
+	// commitThenFail makes POST create the client and still answer 500, as
+	// when the response is lost.
+	commitThenFail bool
+	// raceOnPost, when set, is stored under the requested id just before the
+	// next POST is handled: a third party taking the id first.
+	raceOnPost *rauthy.ClientResponse
+	authz      string
+	srv        *httptest.Server
 }
 
 func newFakeRauthy(t *testing.T) *fakeRauthy {
 	t.Helper()
-	f := &fakeRauthy{clients: map[string]*rauthy.ClientResponse{}}
+	f := &fakeRauthy{clients: map[string]*rauthy.ClientResponse{}, secrets: map[string]string{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
 	return f
@@ -47,10 +62,31 @@ func (f *fakeRauthy) api(t *testing.T) *rauthy.Client {
 
 // put stores a client directly, as if somebody had created it in Rauthy.
 func (f *fakeRauthy) put(c *rauthy.ClientResponse) {
+	f.putWithSecret(c, fakeSecret)
+}
+
+// putWithSecret stores a client with the given secret, as if somebody had
+// created it in Rauthy.
+func (f *fakeRauthy) putWithSecret(c *rauthy.ClientResponse, secret string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	cp := *c
 	f.clients[c.ID] = &cp
+	f.secrets[c.ID] = secret
+}
+
+// secretOf returns the test client's current secret.
+func (f *fakeRauthy) secretOf() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.secrets[testID]
+}
+
+// rotate gives the test client a new secret, as the Rauthy UI does.
+func (f *fakeRauthy) rotate() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.secrets[testID] = "rotated-secret"
 }
 
 // stored returns the test client as Rauthy holds it, or nil.
@@ -71,6 +107,19 @@ func (f *fakeRauthy) callLog() []string {
 	return append([]string(nil), f.calls...)
 }
 
+func (f *fakeRauthy) deleteStored() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.clients, testID)
+	delete(f.secrets, testID)
+}
+
+func (f *fakeRauthy) resetCalls() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = nil
+}
+
 func (f *fakeRauthy) lastAuthorization() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -81,13 +130,19 @@ func (f *fakeRauthy) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	path := strings.TrimPrefix(r.URL.Path, rauthy.APIBasePath)
+	path, ok := strings.CutPrefix(r.URL.Path, rauthy.APIBasePath)
+	if !ok {
+		// Not the API: something on the host probing the test port. Neither
+		// recorded nor answered as Rauthy.
+		writeError(w, http.StatusNotFound, "not the Rauthy API")
+		return
+	}
 	f.calls = append(f.calls, r.Method+" "+path)
 	f.authz = r.Header.Get("Authorization")
 
-	rest, ok := strings.CutPrefix(path, "/clients")
+	rest, isClients := strings.CutPrefix(path, "/clients")
 	switch {
-	case !ok:
+	case !isClients:
 		writeError(w, http.StatusNotFound, "no such route")
 	case rest == "" && r.Method == http.MethodPost:
 		f.create(w, r)
@@ -109,6 +164,13 @@ func (f *fakeRauthy) create(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if f.raceOnPost != nil {
+		cp := *f.raceOnPost
+		cp.ID = req.ID
+		f.clients[req.ID] = &cp
+		f.secrets[req.ID] = "third-party-secret"
+		f.raceOnPost = nil
 	}
 	if _, exists := f.clients[req.ID]; exists {
 		writeError(w, http.StatusBadRequest, "client id already exists")
@@ -133,6 +195,12 @@ func (f *fakeRauthy) create(w http.ResponseWriter, r *http.Request) {
 		c.Challenges = []string{"S256"}
 	}
 	f.clients[req.ID] = c
+	f.created++
+	f.secrets[req.ID] = fmt.Sprintf("created-secret-%d", f.created)
+	if f.commitThenFail {
+		writeError(w, http.StatusInternalServerError, "connection reset")
+		return
+	}
 	writeJSON(w, c)
 }
 
@@ -148,7 +216,12 @@ func (f *fakeRauthy) byID(w http.ResponseWriter, r *http.Request, id string) {
 	case http.MethodPut:
 		f.update(w, r, id)
 	case http.MethodDelete:
+		if f.failDelete {
+			writeError(w, http.StatusInternalServerError, "database unavailable")
+			return
+		}
 		delete(f.clients, id)
+		delete(f.secrets, id)
 		w.WriteHeader(http.StatusOK)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "unsupported")
@@ -204,9 +277,13 @@ func (f *fakeRauthy) secret(w http.ResponseWriter, id string) {
 		writeError(w, http.StatusNotFound, "client not found")
 		return
 	}
+	if f.failSecret {
+		writeError(w, http.StatusInternalServerError, "database unavailable")
+		return
+	}
 	resp := rauthy.ClientSecretResponse{ID: id, Confidential: c.Confidential}
 	if c.Confidential {
-		s := fakeSecret
+		s := f.secrets[id]
 		resp.Secret = &s
 	}
 	writeJSON(w, resp)

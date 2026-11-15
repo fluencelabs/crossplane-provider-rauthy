@@ -51,7 +51,10 @@ jobs:
       - name: Build the controller images and provider packages
         run: make xpkg.build VERSION="$TAG"
       - name: Log in to ghcr.io
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USER: ${{ github.actor }}
+        run: echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
       - name: Push the multi-platform package
         run: |
           crossplane xpkg push \
