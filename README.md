@@ -226,6 +226,12 @@ spec:
       key: api-key
 ```
 
+The provider keeps no cache of Secrets: it reads the API key and writes the
+connection Secrets with direct API calls, so it never lists or watches
+Secrets. The permissions it uses on Secrets are `get`, `create` and `patch`;
+it has no RBAC of its own beyond what Crossplane grants the provider's service
+account.
+
 `url` is where the provider reaches Rauthy; `/auth/v1` is appended
 automatically. It must not carry a query or fragment, and the provider does not
 follow redirects: a `url` that answers 3xx fails with a message naming where it

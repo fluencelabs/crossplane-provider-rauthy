@@ -52,7 +52,6 @@ type flags struct {
 	enableManagementPolicies bool
 	enableChangeLogs         bool
 	changelogsSocketPath     string
-	enableSecretCache        bool
 }
 
 func parseFlags() flags {
@@ -76,8 +75,6 @@ func parseFlags() flags {
 	app.Flag("changelogs-socket-path", "Path of the change logs socket, if enabled.").
 		Default("/var/run/changelogs/changelogs.sock").
 		Envar("CHANGELOGS_SOCKET_PATH").StringVar(&f.changelogsSocketPath)
-	app.Flag("enable-secret-cache", "Serve Secrets from the informer cache instead of direct API calls.").
-		Default("true").Envar("ENABLE_SECRET_CACHE").BoolVar(&f.enableSecretCache)
 	kingpin.MustParse(app.Parse(os.Args[1:]))
 	return f
 }
@@ -107,13 +104,6 @@ func newManager(f flags) ctrl.Manager {
 	cfg, err := ctrl.GetConfig()
 	kingpin.FatalIfError(err, "Cannot get API server rest config")
 
-	var clientOpts client.Options
-	if !f.enableSecretCache {
-		clientOpts = client.Options{
-			Cache: &client.CacheOptions{DisableFor: []client.Object{&corev1.Secret{}}},
-		}
-	}
-
 	scheme := runtime.NewScheme()
 	kingpin.FatalIfError(clientgoscheme.AddToScheme(scheme), "Cannot add client-go scheme")
 	kingpin.FatalIfError(apis.AddToScheme(scheme), "Cannot add Rauthy APIs to scheme")
@@ -132,7 +122,7 @@ func newManager(f flags) ctrl.Manager {
 				},
 			},
 		},
-		Client: clientOpts,
+		Client: clientOptions(),
 
 		// Leases only, and longer than the controller-runtime defaults: short
 		// leases are lost under load when renewals miss their deadline.
@@ -144,6 +134,16 @@ func newManager(f flags) ctrl.Manager {
 	})
 	kingpin.FatalIfError(err, "Cannot create controller manager")
 	return mgr
+}
+
+// clientOptions keeps Secrets out of the manager's cache. The provider reads
+// one API key and writes connection Secrets; served from the cache, the first
+// read would start an informer that lists and watches every Secret in the
+// cluster.
+func clientOptions() client.Options {
+	return client.Options{
+		Cache: &client.CacheOptions{DisableFor: []client.Object{&corev1.Secret{}}},
+	}
 }
 
 func controllerOptions(f flags, log logging.Logger) controller.Options {

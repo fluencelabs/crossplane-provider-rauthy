@@ -18,6 +18,7 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/statemetrics"
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	"github.com/fluencelabs/rauthy-go"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	kube "sigs.k8s.io/controller-runtime/pkg/client"
@@ -105,8 +106,8 @@ type Connector struct {
 	// Kube is the manager's (cached) client.
 	Kube kube.Client
 	// Reader reads from the API server without a cache; ownership is
-	// confirmed through it. Kube is used when it is nil, which is only right
-	// for a client that has no cache.
+	// confirmed and the API key read through it. Kube is used when it is
+	// nil, which is only right for a client that has no cache.
 	Reader kube.Reader
 	Usage  UsageTracker
 
@@ -142,9 +143,11 @@ func (c *Connector) Connect(
 		return nil, fmt.Errorf("cannot get ClusterProviderConfig %q: %w", ref.Name, err)
 	}
 
-	sel := pc.Spec.Credentials.SecretRef
-	key, err := resource.CommonCredentialExtractor(ctx, pc.Spec.Credentials.Source, c.Kube,
-		xpv2.CommonCredentialSelectors{SecretRef: &sel})
+	reader := c.Reader
+	if reader == nil {
+		reader = c.Kube
+	}
+	key, err := readAPIKey(ctx, reader, pc.Spec.Credentials)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read the Rauthy API key: %w", err)
 	}
@@ -153,9 +156,20 @@ func (c *Connector) Connect(
 	if err != nil {
 		return nil, fmt.Errorf("cannot build the Rauthy client: %w", err)
 	}
-	reader := c.Reader
-	if reader == nil {
-		reader = c.Kube
-	}
 	return newExternal(api, c.Kube.Status(), reader, issuerFor(pc.Spec.URL, pc.Spec.IssuerURL), &c.crd), nil
+}
+
+// readAPIKey reads the API key from its Secret through r, which must not be
+// the cached client: a cached read would start an informer over every Secret
+// in the cluster.
+func readAPIKey(ctx context.Context, r kube.Reader, creds v1alpha1.ProviderCredentials) ([]byte, error) {
+	if creds.Source != xpv2.CredentialsSourceSecret {
+		return nil, fmt.Errorf("unsupported credentials source %q: only Secret is supported", creds.Source)
+	}
+	sel := creds.SecretRef
+	s := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: sel.Namespace, Name: sel.Name}, s); err != nil {
+		return nil, fmt.Errorf("cannot get the credentials Secret: %w", err)
+	}
+	return s.Data[sel.Key], nil
 }
