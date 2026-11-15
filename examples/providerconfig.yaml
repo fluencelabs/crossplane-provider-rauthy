@@ -1,0 +1,26 @@
+# The API key Secret lives in the provider's namespace only. Create the key in
+# the Rauthy Admin UI (API Keys) with the Clients and Secrets rights, then
+# replace the placeholder with the `name$secret` value Rauthy shows once.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rauthy-api-key
+  namespace: crossplane-system
+type: Opaque
+stringData:
+  api-key: REPLACE_WITH_NAME$SECRET
+---
+apiVersion: rauthy.fluence.dev/v1alpha1
+kind: ClusterProviderConfig
+metadata:
+  name: default
+spec:
+  url: http://rauthy.rauthy.svc.cluster.local:8080
+  # The issuer consumers see. Without it, url + /auth/v1 is published.
+  issuerURL: https://auth.example.com/auth/v1
+  credentials:
+    source: Secret
+    secretRef:
+      namespace: crossplane-system
+      name: rauthy-api-key
+      key: api-key

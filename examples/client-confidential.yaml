@@ -1,0 +1,33 @@
+# A confidential client. Its id, secret and the issuer are written to the
+# Secret `grafana-oidc` in the same namespace.
+apiVersion: rauthy.fluence.dev/v1alpha1
+kind: Client
+metadata:
+  name: grafana
+  namespace: monitoring
+spec:
+  providerConfigRef:
+    kind: ClusterProviderConfig
+    name: default
+  writeConnectionSecretToRef:
+    name: grafana-oidc
+  forProvider:
+    name: Grafana
+    confidential: true
+    redirectUris:
+      - https://grafana.example.com/login/generic_oauth
+    postLogoutRedirectUris:
+      - https://grafana.example.com/login
+    flowsEnabled:
+      - authorization_code
+      - refresh_token
+    scopes:
+      - openid
+      - email
+      - profile
+      - groups
+    defaultScopes:
+      - openid
+    accessTokenAlg: EdDSA
+    idTokenAlg: EdDSA
+    accessTokenLifetime: 1800

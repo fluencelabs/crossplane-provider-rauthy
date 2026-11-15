@@ -1,0 +1,27 @@
+# A public client (a single-page app using PKCE). It has no secret: the
+# connection Secret carries client_id and issuer only.
+apiVersion: rauthy.fluence.dev/v1alpha1
+kind: Client
+metadata:
+  name: console
+  namespace: web
+  annotations:
+    # The Rauthy client id. Defaults to metadata.name; immutable once created.
+    crossplane.io/external-name: web-console
+spec:
+  providerConfigRef:
+    kind: ClusterProviderConfig
+    name: default
+  writeConnectionSecretToRef:
+    name: console-oidc
+  forProvider:
+    name: Web Console
+    confidential: false
+    redirectUris:
+      - https://console.example.com/callback
+    allowedOrigins:
+      - https://console.example.com
+    flowsEnabled:
+      - authorization_code
+    challenges:
+      - S256
