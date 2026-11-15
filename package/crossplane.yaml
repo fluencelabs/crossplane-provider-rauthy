@@ -1,0 +1,16 @@
+apiVersion: meta.pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: crossplane-provider-rauthy
+  annotations:
+    meta.crossplane.io/maintainer: Fluence Labs
+    meta.crossplane.io/source: github.com/fluencelabs/crossplane-provider-rauthy
+    meta.crossplane.io/license: Apache-2.0
+    meta.crossplane.io/description: |
+      Manages OIDC clients in Rauthy. The provider only ever manages clients it
+      created itself and never adopts an existing one.
+spec:
+  crossplane:
+    version: ">=v2.0.0"
+  capabilities:
+    - safe-start
