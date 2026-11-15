@@ -33,12 +33,15 @@ rejected by the API server.
 **The provider never takes over, modifies or deletes a Rauthy client it did not
 create.** A `Client` manages exactly the Rauthy client it created itself:
 
-- If a client with the same id already exists in Rauthy, the `Client` reports
-  `client "<id>" already exists in Rauthy and was not created by this resource;
-  adoption is not supported` and does nothing else: it does not mark the
-  resource as existing, does not update the client and does not publish its
-  secret. This holds whether the existing client is found while observing or
-  when Rauthy refuses the create request.
+- If a client with the same id already exists in Rauthy and the `Client`
+  holds no ownership record for it, the `Client` reports `a client with id
+  "<id>" exists in Rauthy and this resource holds no ownership record for it,
+  so it is not managed; if an interrupted create of this resource made it,
+  delete it in Rauthy to retry, otherwise choose another id` and does nothing
+  else: it does not mark the resource as existing, does not update the client
+  and does not publish its secret. This one message is used whatever the
+  reason; the provider cannot tell a stranger's client from one its own
+  interrupted create left behind, so check before deleting anything.
 - Deleting a `Client` deletes only a Rauthy client it created. A `Client` that
   never created anything (for example one stuck on the error above) is deleted
   without touching Rauthy.
@@ -56,17 +59,47 @@ create.** A `Client` manages exactly the Rauthy client it created itself:
 ### What counts as ownership
 
 The only evidence is `status.ownership` (`clientID` and `createdAt`) on the
-`Client`. The provider writes it through the status subresource immediately
-after Rauthy accepts the create, and clears it before creating again. A
-`Client` owns a Rauthy client exactly when `status.ownership.clientID` equals
-its external name. Annotations, including Crossplane's
-`crossplane.io/external-create-*` marks, grant nothing.
+`Client`, as the API server holds it. The provider writes it through the
+status subresource immediately after Rauthy accepts the create. A `Client`
+owns a Rauthy client exactly when `status.ownership.clientID` equals its
+external name. Annotations, including Crossplane's
+`crossplane.io/external-create-*` marks, influence neither what the provider
+does nor what it reports.
 
 Before it acts as the owner (reports the client as existing, reads its
 secret, updates or deletes it), the provider re-reads the `Client` straight
 from the API server, bypassing its cache, and requires the record there, on
 the same object (same UID). A lagging cache can therefore delay the provider
-but never make it act on a client it no longer owns.
+but never make it act on a client it does not own.
+
+The provider keeps one invariant: **a record names a client id only while
+this resource's client with that id exists in Rauthy.**
+
+| State | Record | Rauthy client | What happens |
+| ----- | ------ | ------------- | ------------ |
+| S0    | none   | none          | The client is created. |
+| S1    | none   | exists        | Refused with the message above. |
+| S2    | id     | exists        | Owned: observed, updated, deleted. |
+| S3    | id     | none          | Transient: the record is cleared, confirmed, before anything else. |
+
+- **Create** (S0): the POST, then the record. If writing the record fails,
+  the provider re-reads the `Client` without the cache: if the record landed
+  anyway, the client is kept (S2); if it did not, the new client is deleted
+  again (back to S0); if even the re-read fails, the client is neither
+  deleted nor claimed, and the next reconcile decides from a fresh read (S2
+  or S1). Re-reads and the rollback run on their own bounded context, so an
+  expired reconcile deadline does not stop them.
+- **Delete** (S2): the DELETE, then the record is cleared at once.
+- **A client that disappears** (S2 to S3, by Delete or out of band): the next
+  observation clears the record and only then lets the resource create again
+  or finish deleting.
+
+What each interruption leaves: before the POST, S0; between the POST and the
+record, S1 (refused until someone deletes the client in Rauthy); after the
+record, S2; between a DELETE and clearing the record, S3, which the next
+reconcile repairs. One window cannot be closed: in S3, a client someone else
+creates with the same id before the record is cleared looks like S2. Avoid
+reusing client ids across owners.
 
 The API server ignores `status` when a `Client` is created or updated through
 the main resource, so a manifest cannot carry ownership. What it does rely on:
@@ -84,37 +117,32 @@ the main resource, so a manifest cannot carry ownership. What it does rely on:
   free and any redirect URIs.
 - **Status is not backed up reliably.** Restoring a `Client` from a backup or
   re-applying it from Git recreates it without `status.ownership`. The resource
-  then fails safe: it refuses its own client as foreign. To recover, either
-  delete the client in Rauthy, after which the resource creates it again (with
-  a new secret), or delete the `Client` (which leaves the Rauthy client alone)
-  and remove the client in Rauthy by hand.
+  then fails safe: it refuses its own client. To recover, either delete the
+  client in Rauthy, after which the resource creates it again (with a new
+  secret), or delete the `Client` (which leaves the Rauthy client alone) and
+  remove the client in Rauthy by hand.
 
 ### When a create goes wrong
 
-- **Rauthy refuses the create** (a 4xx answer) and a client with that id
-  exists: the id belongs to somebody else. The resource reports the adoption
-  error above, and keeps reporting it on later reconciles.
-- **The create request fails ambiguously** (a timeout, a transport error or a
-  5xx answer) and a client with that id exists afterwards: the create may have
-  gone through, but that cannot be proven. The resource reports `create outcome
-  unknown: the request failed but a client with id "<id>" now exists; verify
-  and delete it in Rauthy to retry` and does not claim the client. It keeps
-  reporting this on later reconciles, as long as its own failed or interrupted
-  create attempt is on record; the same error appears when the provider
-  stopped between the create and recording ownership. Check the client in
-  Rauthy and delete it if it is not in use; the resource then creates it
-  afresh. The create attempts on record (annotations) only choose this
-  wording; they never grant ownership.
-- **Recording ownership fails** after Rauthy accepted the create, including
-  when the installed `Client` CRD is older and silently drops
-  `status.ownership` (the error then says so: upgrade the CRDs): the provider
-  deletes the new client again and retries on the next reconcile. If that
-  deletion fails too, the error names the client to delete in Rauthy by hand.
+The create call itself knows how it ended, and its error says so once:
 
-Rauthy itself keeps no record of who created a client. One gap remains: if an
-owned client is deleted in Rauthy out of band and somebody else creates a
-client with the same id before the provider next looks, the provider cannot
-tell it from its own and manages it. Avoid reusing client ids across owners.
+- **Rauthy refuses the create** (a 4xx answer) and a client with that id
+  exists: `client "<id>" already exists in Rauthy and was not created by this
+  resource; choose another id`.
+- **The create request fails ambiguously** (a timeout, a transport error or a
+  5xx answer) and a client with that id exists afterwards: `create outcome
+  unknown: the request failed but a client with id "<id>" now exists; verify
+  and delete it in Rauthy to retry`.
+- **Recording ownership fails**: see Create above. If the rollback DELETE
+  fails, the error names the client to delete in Rauthy by hand.
+- **The installed `Client` CRD is older** and silently drops
+  `status.ownership`: the new client is deleted again and the provider stops
+  creating clients, reporting that the CRD lacks the field, until it is
+  restarted with current CRDs. This avoids creating and deleting a client on
+  every reconcile.
+
+From the next reconcile on, every one of these shows the single message from
+the no-adoption rule above.
 
 ## Install
 
