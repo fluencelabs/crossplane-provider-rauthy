@@ -1,0 +1,59 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+
+# release-please acts with the bot token below, not with GITHUB_TOKEN, so the
+# workflow token needs nothing beyond reading the repository by default.
+permissions:
+  contents: read
+
+# Release runs queue rather than cancel: a cancelled run could leave a tag
+# without its GitHub release or its package.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        with:
+          # A pull request opened with GITHUB_TOKEN would not trigger the ci
+          # workflow; the bot token does, so the release PR gets its checks.
+          token: ${{ secrets.FLUENCEBOT_RELEASE_PLEASE_PAT }}
+
+  # A release publishes the multi-platform provider package, tagged with the
+  # release tag.
+  publish:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      TAG: ${{ needs.release-please.outputs.tag_name }}
+      PACKAGE: ghcr.io/${{ github.repository_owner }}/crossplane-provider-rauthy
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - name: Install the crossplane CLI
+        run: .github/scripts/install-crossplane-cli.sh
+      - name: Build the controller images and provider packages
+        run: make xpkg.build VERSION="$TAG"
+      - name: Log in to ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Push the multi-platform package
+        run: |
+          crossplane xpkg push \
+            --package-files=_output/xpkg/crossplane-provider-rauthy-amd64.xpkg,_output/xpkg/crossplane-provider-rauthy-arm64.xpkg \
+            "${PACKAGE}:${TAG}"

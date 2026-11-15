@@ -1,0 +1,127 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # New advisories land without a commit here: a nightly govulncheck run
+  # reports them before an unrelated pull request trips over them.
+  schedule:
+    - cron: "0 4 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  # A pull request shares one group, so a new push cancels the superseded run.
+  # Other runs get a group of their own: every main commit is checked.
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.15.0
+
+  test:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./... -race -count=1 -coverprofile=coverage.out
+      - name: Coverage summary
+        run: |
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {print $NF}')
+          controller=$(go test ./internal/controller/client -count=1 -cover | awk '{for (i = 1; i <= NF; i++) if ($i == "coverage:") print $(i + 1)}')
+          {
+            echo "Total coverage: ${total}"
+            echo
+            echo "Client controller coverage: ${controller}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  tidy:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go mod tidy leaves no diff
+        run: |
+          go mod tidy
+          if ! git diff --exit-code go.mod go.sum; then
+            echo "go.mod/go.sum are not tidy: run 'go mod tidy' and commit the result"
+            exit 1
+          fi
+      - name: Gofmt check
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "Files need gofmt:"
+            echo "$out"
+            exit 1
+          fi
+      - name: make generate leaves no diff
+        run: |
+          make generate
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --porcelain
+            git diff
+            echo "Generated code or CRDs are stale: run 'make generate' and commit the result"
+            exit 1
+          fi
+
+  vuln:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  build:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the crossplane CLI
+        run: .github/scripts/install-crossplane-cli.sh
+      - name: Build the controller images and provider packages
+        # Builds for every platform and embeds each image in its package.
+        # Nothing is pushed here; publishing happens on a release only.
+        run: make xpkg.build VERSION="${GITHUB_SHA::12}"
+
+  ci-ok:
+    if: always()
+    needs: [lint, test, tidy, vuln, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All checks passed
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "A required job failed or was cancelled"
+            exit 1
+          fi
