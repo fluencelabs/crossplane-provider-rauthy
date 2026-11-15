@@ -13,6 +13,7 @@ import (
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	"github.com/fluencelabs/rauthy-go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	kube "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/fluencelabs/crossplane-provider-rauthy/apis/v1alpha1"
@@ -184,19 +185,31 @@ func (e *external) ensureOwned(ctx context.Context, cr *v1alpha1.Client, id stri
 // patchOwnership writes the marker (nil clears it) and reports what the API
 // server holds afterwards: the patch answer when it succeeded, an uncached
 // read when it failed. known is false when neither could be learned.
+//
+// The answer is decoded into an empty object, not into cr: the client decodes
+// it without zeroing the target first, so a field the server pruned (absent
+// from the answer) would otherwise keep the marker cr was given.
 func (e *external) patchOwnership(
 	ctx context.Context,
 	cr *v1alpha1.Client,
 	want *v1alpha1.ClientOwnership,
 ) (*v1alpha1.ClientOwnership, bool, error) {
-	orig := cr.DeepCopy()
-	cr.Status.Ownership = want
-	patchErr := e.status.Patch(ctx, cr, kube.MergeFrom(orig))
+	desired := cr.DeepCopy()
+	desired.Status.Ownership = want
+	patch, err := kube.MergeFrom(cr).Data(desired)
+	if err != nil {
+		return nil, false, fmt.Errorf("cannot build the status.ownership patch: %w", err)
+	}
+	answer := &v1alpha1.Client{}
+	answer.SetNamespace(cr.GetNamespace())
+	answer.SetName(cr.GetName())
+	patchErr := e.status.Patch(ctx, answer, kube.RawPatch(types.MergePatchType, patch))
 	if patchErr == nil {
 		// The answer is the object as stored.
-		return cr.Status.Ownership, true, nil
+		cr.SetResourceVersion(answer.GetResourceVersion())
+		cr.Status.Ownership = answer.Status.Ownership
+		return answer.Status.Ownership, true, nil
 	}
-	cr.Status.Ownership = orig.Status.Ownership
 	fresh, err := e.readFresh(ctx, cr)
 	if err != nil {
 		return nil, false, fmt.Errorf(
