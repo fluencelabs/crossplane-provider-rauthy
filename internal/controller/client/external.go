@@ -73,6 +73,9 @@ type external struct {
 	status kube.SubResourceWriter
 	// reader reads the Client from the API server, bypassing the cache.
 	reader kube.Reader
+	// cache looks Clients up by ClientIDIndex; nil sends those lookups to
+	// reader.
+	cache  kube.Reader
 	issuer string
 	// crd is set, for the life of the process, once the installed CRD is
 	// found to prune status.ownership.
@@ -92,11 +95,17 @@ func NewExternal(
 	reader kube.Reader,
 	issuer string,
 ) managed.TypedExternalClient[*v1alpha1.Client] {
-	return newExternal(c, status, reader, issuer, &atomic.Bool{})
+	return newExternal(c, status, reader, nil, issuer, &atomic.Bool{})
 }
 
-func newExternal(c api, status kube.SubResourceWriter, reader kube.Reader, issuer string, crd *atomic.Bool) *external {
-	return &external{api: c, status: status, reader: reader, issuer: issuer, crd: crd}
+func newExternal(
+	c api,
+	status kube.SubResourceWriter,
+	reader, cache kube.Reader,
+	issuer string,
+	crd *atomic.Bool,
+) *external {
+	return &external{api: c, status: status, reader: reader, cache: cache, issuer: issuer, crd: crd}
 }
 
 // Observe reads the client and decides whether this resource owns it. The
@@ -342,6 +351,12 @@ func (e *external) Delete(ctx context.Context, cr *v1alpha1.Client) (managed.Ext
 	if o != ownedClient {
 		// Never delete a client this resource did not create.
 		return managed.ExternalDelete{}, nil
+	}
+	// The ownership confirmation looked other records up in the cache;
+	// repeat that uncached before the one call that cannot be undone.
+	taken, err := e.recordedElsewhere(ctx, cr, id)
+	if err != nil || taken {
+		return managed.ExternalDelete{}, err
 	}
 
 	if err = e.api.DeleteClient(ctx, id); err != nil && !rauthy.IsNotFound(err) {

@@ -83,10 +83,13 @@ record was made for.
   client deleted and recreated outside Kubernetes with the same id is still
   taken for the resource's own.
 - **A record must be the only one for its id.** Rauthy client ids are global,
-  while `Client` objects are namespaced. Before acting as the owner, and
-  before creating a client, the provider lists every `Client` in the cluster
-  straight from the API server; if another `Client` (another UID) records the
-  same id, this one is refused. This holds for confidential clients too: two
+  while `Client` objects are namespaced. If another `Client` (another UID)
+  records the same id, this one is refused. Every observation looks such a
+  record up in the provider's cache (an index on `status.ownership.clientID`),
+  which can miss a record written within the cache's lag. The create and the
+  delete do not rely on that: right before the create call and right before
+  the delete call the provider lists every `Client` in the cluster straight
+  from the API server and refuses on a match. This holds for confidential clients too: two
   records of one id can only come from a record that outlived its client or
   from a forged one, and the provider cannot tell which of the two is right.
   A record left behind by a client deleted out of band therefore blocks other
@@ -100,9 +103,11 @@ Before it acts as the owner (reports the client as existing, reads or
 publishes its secret, updates or deletes it), the provider re-reads the
 `Client` straight from the API server, bypassing its cache, requires the
 record there on the same object (same UID), checks that no other `Client`
-records the id, and checks the fingerprint. A
-lagging cache can therefore delay the provider but never make it act on a
-client it does not own.
+records the id (in the cache, and uncached again before a delete), and checks
+the fingerprint. A lagging cache can therefore delay the provider but never
+make it create or delete a client it does not own; an update of a client
+whose id another `Client` recorded within the cache's lag is the one action
+that check can come too late for.
 
 The provider keeps one invariant: **a record names a client id only while
 this resource's client with that id exists in Rauthy.**

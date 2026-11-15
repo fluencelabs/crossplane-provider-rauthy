@@ -142,7 +142,7 @@ func (e *external) verifyOwner(
 	if rec == nil {
 		return notOwned, nil, nil
 	}
-	taken, err := e.recordedElsewhere(ctx, fresh, id)
+	taken, err := e.recordedElsewhereCached(ctx, fresh, id)
 	if err != nil || taken {
 		return notOwned, nil, err
 	}
@@ -173,12 +173,33 @@ func (e *external) verifyOwner(
 	return ownedClient, s.Secret, nil
 }
 
+// ClientIDIndex is the cache field index of Clients by the client id their
+// status.ownership records.
+const ClientIDIndex = "status.ownership.clientID"
+
+// IndexClientID extracts the ClientIDIndex value of a Client: the client id
+// its record names, if any.
+func IndexClientID(o kube.Object) []string {
+	cr, ok := o.(*v1alpha1.Client)
+	if !ok {
+		return nil
+	}
+	if id := ownedClientID(cr); id != "" {
+		return []string{id}
+	}
+	return nil
+}
+
 // recordedElsewhere reports whether another Client, in any namespace, records
 // id in its status.ownership. Client ids are global in Rauthy while Clients
 // are namespaced, and a public client's record is bound by the id alone: a
 // record held by two objects cannot tell which of them created the client, so
 // neither may act as its owner, and no Client may create an id another one
-// records. The list is read from the API server, bypassing the cache.
+// records.
+//
+// This is the authoritative check: every Client is listed from the API
+// server, bypassing the cache. Create runs it right before the POST and
+// Delete right before the DELETE.
 func (e *external) recordedElsewhere(ctx context.Context, cr *v1alpha1.Client, id string) (bool, error) {
 	ctx, cancel := detached(ctx)
 	defer cancel()
@@ -187,13 +208,33 @@ func (e *external) recordedElsewhere(ctx context.Context, cr *v1alpha1.Client, i
 		return false, fmt.Errorf("cannot confirm ownership of client %q: cannot list Clients without the cache: %w",
 			id, err)
 	}
-	for i := range all.Items {
-		other := &all.Items[i]
-		if other.GetUID() != cr.GetUID() && ownedClientID(other) == id {
-			return true, nil
+	return otherRecord(all.Items, cr, id) != nil, nil
+}
+
+// recordedElsewhereCached is recordedElsewhere answered from the cache,
+// through the ClientIDIndex, for the paths that run on every poll (Observe,
+// and Update after it). It can miss a record written within the cache's lag;
+// nothing destructive or creating relies on it alone, since Create and Delete
+// repeat the check uncached.
+func (e *external) recordedElsewhereCached(ctx context.Context, cr *v1alpha1.Client, id string) (bool, error) {
+	if e.cache == nil {
+		return e.recordedElsewhere(ctx, cr, id)
+	}
+	same := &v1alpha1.ClientList{}
+	if err := e.cache.List(ctx, same, kube.MatchingFields{ClientIDIndex: id}); err != nil {
+		return false, fmt.Errorf("cannot confirm ownership of client %q: cannot look up other records: %w", id, err)
+	}
+	return otherRecord(same.Items, cr, id) != nil, nil
+}
+
+// otherRecord returns a Client among items, other than cr, that records id.
+func otherRecord(items []v1alpha1.Client, cr *v1alpha1.Client, id string) *v1alpha1.Client {
+	for i := range items {
+		if other := &items[i]; other.GetUID() != cr.GetUID() && ownedClientID(other) == id {
+			return other
 		}
 	}
-	return false, nil
+	return nil
 }
 
 // ensureOwned is verifyOwner for the acting paths, reusing a confirmation

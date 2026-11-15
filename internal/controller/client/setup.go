@@ -42,6 +42,11 @@ func SetupGated(mgr ctrl.Manager, o controller.Options) error {
 func Setup(mgr ctrl.Manager, o controller.Options) error {
 	name := managed.ControllerName(v1alpha1.ClientGroupKind)
 
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &v1alpha1.Client{}, ClientIDIndex,
+		IndexClientID); err != nil {
+		return fmt.Errorf("cannot index Clients by recorded client id: %w", err)
+	}
+
 	opts := append(ReconcilerOptions(&Connector{
 		Kube:   mgr.GetClient(),
 		Reader: mgr.GetAPIReader(),
@@ -107,7 +112,8 @@ type Connector struct {
 	Kube kube.Client
 	// Reader reads from the API server without a cache; ownership is
 	// confirmed and the API key read through it. Kube is used when it is
-	// nil, which is only right for a client that has no cache.
+	// nil, which is only right for a client that has no cache. When Reader
+	// is set, Kube must index Clients by ClientIDIndex.
 	Reader kube.Reader
 	Usage  UsageTracker
 
@@ -143,9 +149,9 @@ func (c *Connector) Connect(
 		return nil, fmt.Errorf("cannot get ClusterProviderConfig %q: %w", ref.Name, err)
 	}
 
-	reader := c.Reader
+	reader, cache := c.Reader, kube.Reader(c.Kube)
 	if reader == nil {
-		reader = c.Kube
+		reader, cache = c.Kube, nil
 	}
 	key, err := readAPIKey(ctx, reader, pc.Spec.Credentials)
 	if err != nil {
@@ -156,7 +162,7 @@ func (c *Connector) Connect(
 	if err != nil {
 		return nil, fmt.Errorf("cannot build the Rauthy client: %w", err)
 	}
-	return newExternal(api, c.Kube.Status(), reader, issuerFor(pc.Spec.URL, pc.Spec.IssuerURL), &c.crd), nil
+	return newExternal(api, c.Kube.Status(), reader, cache, issuerFor(pc.Spec.URL, pc.Spec.IssuerURL), &c.crd), nil
 }
 
 // readAPIKey reads the API key from its Secret through r, which must not be
