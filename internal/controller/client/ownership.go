@@ -274,10 +274,12 @@ func (e *external) ensureOwned(ctx context.Context, cr *v1alpha1.Client, id stri
 // server holds afterwards: the patch answer when it succeeded, an uncached
 // read when it failed. known is false when neither could be learned.
 //
-// The answer is decoded into an empty object, not into cr: the client decodes
-// it without zeroing the target first, so a field the server pruned (absent
-// from the answer) would otherwise keep the marker cr was given. The answer
-// then replaces cr whole, as decoding into cr used to: cr carries the
+// The answer is decoded into an empty object, not into cr, so that a field the
+// server pruned (absent from the answer) cannot keep the marker cr was given
+// whatever the decoder does with absent fields. (The typed client against a
+// real API server resets the target before decoding; the envtest suite shows
+// it. Decoding into a fresh object does not depend on that.) The answer then
+// replaces cr whole, as decoding into cr used to: cr carries the
 // server's current spec, metadata and resourceVersion together, so a later
 // Update of cr cannot write back a spec or finalizers that changed meanwhile.
 func (e *external) patchOwnership(

@@ -58,6 +58,24 @@ jobs:
             echo "Client controller coverage: ${controller}"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  envtest:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Cache the envtest binaries
+        # The Kubernetes version is pinned in the Makefile.
+        uses: actions/cache@v6
+        with:
+          path: _output/envtest
+          key: envtest-${{ runner.os }}-${{ hashFiles('Makefile') }}
+      - name: Tests against a real API server
+        run: make test.envtest
+
   tidy:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
@@ -116,7 +134,7 @@ jobs:
 
   ci-ok:
     if: always()
-    needs: [lint, test, tidy, vuln, build]
+    needs: [lint, test, envtest, tidy, vuln, build]
     runs-on: ubuntu-latest
     steps:
       - name: All checks passed

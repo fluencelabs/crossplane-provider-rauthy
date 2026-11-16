@@ -1,4 +1,4 @@
-.PHONY: generate test lint build image xpkg.build clean
+.PHONY: generate test test.envtest lint build image xpkg.build clean
 
 # Every go command uses go.mod's own Go version, the one CI sets up.
 GOTOOLCHAIN ?= go$(shell awk '$$1 == "go" { print $$2; exit }' go.mod)
@@ -21,6 +21,17 @@ generate:
 
 test:
 	go test ./... -race -count=1
+
+# The controller against a real kube-apiserver and etcd, fetched by
+# setup-envtest for ENVTEST_K8S_VERSION into ENVTEST_DIR.
+ENVTEST_K8S_VERSION ?= 1.35.0
+SETUP_ENVTEST ?= sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.3
+ENVTEST_DIR ?= $(OUTPUT)/envtest
+
+test.envtest:
+	assets="$$(go run $(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(ENVTEST_DIR) -p path)" && \
+		KUBEBUILDER_ASSETS="$$(cd "$$assets" && pwd)" \
+		go test -tags envtest ./internal/controller/client/ -race -count=1 -run '^TestEnv'
 
 lint:
 	golangci-lint run
