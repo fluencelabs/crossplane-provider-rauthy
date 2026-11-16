@@ -203,6 +203,10 @@ the main resource, so a manifest cannot carry ownership. What it does rely on:
   composes them. Ownership protects existing Rauthy clients, but a tenant who
   can create a `Client` can still create new Rauthy clients with any id that is
   free and any redirect URIs.
+- **Whoever writes a public `Client`'s spec decides its PKCE.** Setting
+  `challenges: []` on a public client removes every PKCE challenge method from
+  it, and Rauthy accepts that; the provider passes it through. Review
+  `challenges` on public clients the way you review `redirectUris`.
 - **Status is not backed up reliably.** Restoring a `Client` from a backup or
   re-applying it from Git recreates it without `status.ownership`. The resource
   then fails safe: it refuses its own client. To recover, either delete the
@@ -348,9 +352,9 @@ settings listed under "Not yet supported". Only `confidential` and
 | `idTokenAlg`             | string   | `RS256`, `RS384`, `RS512` or `EdDSA`.                                      |
 | `authCodeLifetime`       | int      | Seconds, 10 to 300.                                                        |
 | `accessTokenLifetime`    | int      | Seconds, 10 to 86400.                                                      |
-| `scopes`                 | []string | Scopes the client may request.                                             |
-| `defaultScopes`          | []string | Scopes granted without being requested.                                    |
-| `challenges`             | []string | PKCE methods, `plain` and `S256`.                                          |
+| `scopes`                 | []string | Scopes the client may request. At least one; cannot be cleared.            |
+| `defaultScopes`          | []string | Scopes granted without being requested. At least one; cannot be cleared.   |
+| `challenges`             | []string | PKCE methods, `plain` and `S256`. **Warning:** `[]` on a public client removes PKCE from it, and Rauthy accepts that. |
 | `forceMfa`               | bool     | Require MFA for logins through this client.                                |
 | `clientUri`              | string   | Informational URI of the application.                                      |
 | `contacts`               | []string | Contacts of the application's maintainers.                                 |
@@ -380,11 +384,16 @@ or the string to `""`:
 The resource reports drift until Rauthy holds no value for the field. Rauthy
 receives `null` for the fields its API marks nullable (`name`,
 `postLogoutRedirectUris`, `allowedOrigins`, `challenges`, `clientUri`,
-`contacts`, `backchannelLogoutUri`, `restrictGroupPrefix`) and `[]` for
-`scopes` and `defaultScopes`, which it requires as lists. `flowsEnabled`
-cannot be empty in Rauthy and keeps `minItems: 1`; `redirectUris` and
+`contacts`, `backchannelLogoutUri`, `restrictGroupPrefix`). `redirectUris` and
 `confidential` are required. Should Rauthy keep a value of its own for a
 cleared field, the resource stays out of sync and names the field.
+
+**`scopes`, `defaultScopes` and `flowsEnabled` cannot be empty.** Each keeps
+`minItems: 1`, so the API server refuses `[]`. Rauthy answers an update with an
+empty scope list with success but stores its default scope (`openid`) instead,
+so a spec asking for `[]` would never match and would send an update on every
+reconcile; it refuses an empty flow list outright. Leave them out to keep what
+Rauthy holds.
 
 A new client is created in two steps: the create call carries only the id,
 name, confidentiality and redirect URIs (all Rauthy accepts there), and the
@@ -392,6 +401,16 @@ rest of the spec follows as an ordinary update on the next reconcile. If that
 update fails, the resource still owns the client and keeps retrying it. The
 `Ready` condition is true once the client exists, belongs to the resource and
 matches the spec.
+
+## Rauthy versions
+
+The wire types (through rauthy-go) mirror Rauthy 0.36.2. Against 0.35.2 the
+managed `Client` fields behave the same. The four settings the provider
+preserves but does not manage (`allowed_resources`, `default_aud`, `claims`,
+`claims_at_root`) are not stored by 0.35.2 at all: it accepts them in an update
+and drops them, and never reports them. The API key needs the `Clients` and
+`Secrets` access groups. This was observed against throwaway containers of
+both versions.
 
 ## Not yet supported
 
