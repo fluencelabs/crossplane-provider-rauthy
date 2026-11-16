@@ -17,7 +17,8 @@ import (
 // is the source of truth for them; this test fails when the two drift apart.
 // Run `make generate` after changing a marker so the CRD is current.
 
-func clientForProvider(t *testing.T) map[string]apiextensionsv1.JSONSchemaProps {
+// clientSchema returns the OpenAPI schema of the Client CRD's only version.
+func clientSchema(t *testing.T) *apiextensionsv1.JSONSchemaProps {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "package", "crds", "rauthy.fluence.dev_clients.yaml"))
 	if err != nil {
@@ -30,8 +31,12 @@ func clientForProvider(t *testing.T) map[string]apiextensionsv1.JSONSchemaProps 
 	if len(crd.Spec.Versions) != 1 {
 		t.Fatalf("the Client CRD has %d versions, want 1", len(crd.Spec.Versions))
 	}
-	schema := crd.Spec.Versions[0].Schema.OpenAPIV3Schema
-	return schema.Properties["spec"].Properties["forProvider"].Properties
+	return crd.Spec.Versions[0].Schema.OpenAPIV3Schema
+}
+
+func clientForProvider(t *testing.T) map[string]apiextensionsv1.JSONSchemaProps {
+	t.Helper()
+	return clientSchema(t).Properties["spec"].Properties["forProvider"].Properties
 }
 
 // noneOr prefixes the pattern of an optional string: the empty string means
@@ -165,20 +170,21 @@ func TestCRDConfidentialIsImmutable(t *testing.T) {
 }
 
 // Optional fields accept an explicit "none": an empty list or an empty
-// string. flowsEnabled cannot be empty in Rauthy, and redirectUris is
-// required, so both keep at least one item.
+// string. Rauthy refuses an empty flowsEnabled and replaces an empty scopes or
+// defaultScopes with its default, and redirectUris is required, so these keep
+// at least one item.
 func TestCRDOptionalFieldsAcceptNone(t *testing.T) {
 	t.Parallel()
 	props := clientForProvider(t)
 
 	for _, field := range []string{
-		"postLogoutRedirectUris", "allowedOrigins", "scopes", "defaultScopes", "challenges", "contacts",
+		"postLogoutRedirectUris", "allowedOrigins", "challenges", "contacts",
 	} {
 		if p := props[field]; p.MinItems != nil {
 			t.Errorf("%s: minItems %d, want none so that [] clears it", field, *p.MinItems)
 		}
 	}
-	for _, field := range []string{"redirectUris", "flowsEnabled"} {
+	for _, field := range []string{"redirectUris", "flowsEnabled", "scopes", "defaultScopes"} {
 		if p := props[field]; p.MinItems == nil || *p.MinItems != 1 {
 			t.Errorf("%s: minItems %v, want 1", field, p.MinItems)
 		}

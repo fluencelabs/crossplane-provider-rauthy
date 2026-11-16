@@ -75,9 +75,11 @@ spec:
                   previous spec set). Removing a field from the spec therefore does not revert
                   it; set the value explicitly to change it. An explicit empty list ([]) or
                   empty string ("") means "none" and clears the field in Rauthy, except for
-                  flowsEnabled, which Rauthy requires to be non-empty. The optional lists
-                  carry no omitempty, so that an empty list survives being written back to
-                  the API server instead of turning into "unset".
+                  flowsEnabled, scopes and defaultScopes, which cannot be empty: Rauthy
+                  refuses an empty flow list and replaces an empty scope list with its
+                  default scope. The other optional lists carry no omitempty, so that an empty
+                  list survives being written back to the API server instead of turning into
+                  "unset".
                 properties:
                   accessTokenAlg:
                     description: AccessTokenAlg is the signing algorithm of access
@@ -119,8 +121,8 @@ spec:
                     type: string
                   challenges:
                     description: |-
-                      Challenges are the accepted PKCE challenge methods. Rauthy requires S256
-                      from public clients regardless of this setting.
+                      Challenges are the accepted PKCE challenge methods. An empty list on a
+                      public client removes PKCE from it, which Rauthy accepts.
                     items:
                       enum:
                       - plain
@@ -155,6 +157,7 @@ spec:
                     items:
                       pattern: ^[a-zA-Z0-9-_/,:*.]{2,64}$
                       type: string
+                    minItems: 1
                     type: array
                     x-kubernetes-list-type: set
                   enabled:
@@ -219,6 +222,7 @@ spec:
                     items:
                       pattern: ^[a-zA-Z0-9-_/,:*.]{2,64}$
                       type: string
+                    minItems: 1
                     type: array
                     x-kubernetes-list-type: set
                 required:

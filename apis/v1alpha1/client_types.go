@@ -16,9 +16,11 @@ import (
 // previous spec set). Removing a field from the spec therefore does not revert
 // it; set the value explicitly to change it. An explicit empty list ([]) or
 // empty string ("") means "none" and clears the field in Rauthy, except for
-// flowsEnabled, which Rauthy requires to be non-empty. The optional lists
-// carry no omitempty, so that an empty list survives being written back to
-// the API server instead of turning into "unset".
+// flowsEnabled, scopes and defaultScopes, which cannot be empty: Rauthy
+// refuses an empty flow list and replaces an empty scope list with its
+// default scope. The other optional lists carry no omitempty, so that an empty
+// list survives being written back to the API server instead of turning into
+// "unset".
 type ClientParameters struct {
 	// Name is the human-readable name shown on the login page.
 	// +optional
@@ -86,18 +88,20 @@ type ClientParameters struct {
 
 	// Scopes the client may request.
 	// +optional
+	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9-_/,:*.]{2,64}$`
 	// +listType=set
-	Scopes []string `json:"scopes"`
+	Scopes []string `json:"scopes,omitempty"`
 
 	// DefaultScopes are granted even when the client does not ask for them.
 	// +optional
+	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9-_/,:*.]{2,64}$`
 	// +listType=set
-	DefaultScopes []string `json:"defaultScopes"`
+	DefaultScopes []string `json:"defaultScopes,omitempty"`
 
-	// Challenges are the accepted PKCE challenge methods. Rauthy requires S256
-	// from public clients regardless of this setting.
+	// Challenges are the accepted PKCE challenge methods. An empty list on a
+	// public client removes PKCE from it, which Rauthy accepts.
 	// +optional
 	// +kubebuilder:validation:items:Enum=plain;S256
 	// +listType=set

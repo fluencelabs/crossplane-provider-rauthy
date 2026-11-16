@@ -9,8 +9,9 @@ import (
 	"github.com/fluencelabs/crossplane-provider-rauthy/apis/v1alpha1"
 )
 
-// withSettings is a client in Rauthy holding a CORS origin, a group
-// restriction and default scopes, all of which a spec may clear.
+// withSettings is a client in Rauthy holding a CORS origin and a group
+// restriction, both of which a spec may clear, and default scopes, which it
+// cannot.
 func withSettings() *rauthy.ClientResponse {
 	c := existing(true)
 	c.AllowedOrigins = []string{"https://app.example.com"}
@@ -29,7 +30,6 @@ func TestExplicitEmptyClears(t *testing.T) {
 	cr := newClient(owned, func(cr *v1alpha1.Client) {
 		cr.Spec.ForProvider.AllowedOrigins = []string{}
 		cr.Spec.ForProvider.RestrictGroupPrefix = new("")
-		cr.Spec.ForProvider.DefaultScopes = []string{}
 	})
 	e := newExternal(t, f, cr)
 
@@ -53,11 +53,6 @@ func TestExplicitEmptyClears(t *testing.T) {
 	}
 	if put.RestrictGroupPrefix != nil {
 		t.Errorf("PUT restrict_group_prefix = %q, want none", *put.RestrictGroupPrefix)
-	}
-	// default_scopes is a required array in Rauthy's API: "none" is [], not
-	// null.
-	if put.DefaultScopes == nil || len(put.DefaultScopes) != 0 {
-		t.Errorf("PUT default_scopes = %#v, want []", put.DefaultScopes)
 	}
 
 	obs, err = e.Observe(context.Background(), cr)

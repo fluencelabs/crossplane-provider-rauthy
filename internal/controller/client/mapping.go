@@ -29,7 +29,7 @@ func createRequest(id string, p *v1alpha1.ClientParameters) rauthy.NewClientRequ
 // every setting the spec does not expose (SCIM, allowed resources, default
 // audiences, custom claims), keeps what Rauthy holds. An empty list or string
 // in the spec clears the field: rauthy-go then leaves a nullable field out of
-// the body (null to Rauthy) and sends a required list as [].
+// the body (null to Rauthy). The scope lists cannot be cleared (see orScopes).
 func updateRequest(id string, p *v1alpha1.ClientParameters, obs *rauthy.ClientResponse) rauthy.UpdateClientRequest {
 	req := obs.UpdateRequest()
 	req.ID = id
@@ -44,8 +44,8 @@ func updateRequest(id string, p *v1alpha1.ClientParameters, obs *rauthy.ClientRe
 	req.IDTokenAlg = orValue(p.IDTokenAlg, req.IDTokenAlg)
 	req.AuthCodeLifetime = orValue(p.AuthCodeLifetime, req.AuthCodeLifetime)
 	req.AccessTokenLifetime = orValue(p.AccessTokenLifetime, req.AccessTokenLifetime)
-	req.Scopes = orList(p.Scopes, req.Scopes)
-	req.DefaultScopes = orList(p.DefaultScopes, req.DefaultScopes)
+	req.Scopes = orScopes(p.Scopes, req.Scopes)
+	req.DefaultScopes = orScopes(p.DefaultScopes, req.DefaultScopes)
 	req.Challenges = orList(p.Challenges, req.Challenges)
 	req.ForceMFA = orValue(p.ForceMFA, req.ForceMFA)
 	req.ClientURI = orString(p.ClientURI, req.ClientURI)
@@ -77,8 +77,8 @@ func differences(p *v1alpha1.ClientParameters, obs *rauthy.ClientResponse) []str
 	check("idTokenAlg", valueEqual(p.IDTokenAlg, obs.IDTokenAlg))
 	check("authCodeLifetime", valueEqual(p.AuthCodeLifetime, obs.AuthCodeLifetime))
 	check("accessTokenLifetime", valueEqual(p.AccessTokenLifetime, obs.AccessTokenLifetime))
-	check("scopes", listEqual(p.Scopes, obs.Scopes))
-	check("defaultScopes", listEqual(p.DefaultScopes, obs.DefaultScopes))
+	check("scopes", scopesEqual(p.Scopes, obs.Scopes))
+	check("defaultScopes", scopesEqual(p.DefaultScopes, obs.DefaultScopes))
 	check("challenges", listEqual(p.Challenges, obs.Challenges))
 	check("forceMfa", valueEqual(p.ForceMFA, obs.ForceMFA))
 	check("clientUri", stringEqual(p.ClientURI, obs.ClientURI))
@@ -155,6 +155,19 @@ func orList(desired, observed []string) []string {
 	return observed
 }
 
+// orScopes resolves a scope list, which cannot be cleared: Rauthy stores its
+// default scope for an empty list, so an empty desired list keeps observed
+// like an unset one. The result is never nil, because Rauthy refuses null.
+func orScopes(desired, observed []string) []string {
+	switch {
+	case len(desired) > 0:
+		return desired
+	case observed == nil:
+		return []string{}
+	}
+	return observed
+}
+
 // stringEqual compares an optional string: unset matches anything, "" matches
 // no value.
 func stringEqual(desired, observed *string) bool {
@@ -175,6 +188,12 @@ func valueEqual[T comparable](desired *T, observed T) bool {
 // anything, an empty one matches no value.
 func listEqual(desired, observed []string) bool {
 	return desired == nil || setEqual(desired, observed)
+}
+
+// scopesEqual compares a scope list: an unset or empty desired list matches
+// anything, as orScopes keeps what Rauthy holds for both.
+func scopesEqual(desired, observed []string) bool {
+	return len(desired) == 0 || setEqual(desired, observed)
 }
 
 // setEqual compares two lists as sets: Rauthy stores these fields without a
