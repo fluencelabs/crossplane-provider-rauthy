@@ -415,15 +415,17 @@ to keep what Rauthy holds, or list the scopes explicitly.
 
 From the release after v0.1.1, a public `Client` (`confidential: false`) whose
 `challenges` is set without `S256` (for example `[]` or `[plain]`) is refused at
-admission. An object stored before the upgrade is not rewritten: the provider
+admission. To fix an object stored before the upgrade, add `S256` to
+`challenges` or remove the field (to keep what Rauthy holds), in the same edit
+as any other change to its `forProvider`: the rule sits on `forProvider`, so
+the API server refuses every edit of `forProvider` with that message until
+`challenges` is fixed. Until then the object is not rewritten: the provider
 reports `a public client must keep S256 among its PKCE challenges` on its
 `Synced` condition and sends nothing of its spec to Rauthy, so the Rauthy
-client keeps its current settings. Add `S256` to `challenges`, or remove the
-field to keep what Rauthy holds. Deleting such a `Client` still deletes its
-Rauthy client. The API server lets other writes to such an object through
-(status, finalizers) only with CRD validation ratcheting, which is on by
-default from Kubernetes 1.30; on an older cluster fix the spec before
-upgrading.
+client keeps its current settings. Status and metadata writes and deletion
+still pass, through CRD validation ratcheting (on by default from Kubernetes
+1.30), and deleting such a `Client` still deletes its Rauthy client; on an
+older cluster fix the spec before upgrading.
 
 ## Rauthy versions
 
