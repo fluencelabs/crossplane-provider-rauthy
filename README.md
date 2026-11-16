@@ -273,7 +273,7 @@ metadata:
   name: default
 spec:
   url: http://rauthy.rauthy.svc.cluster.local:8080
-  issuerURL: https://auth.example.com/auth/v1
+  issuerURL: https://auth.example.com/auth/v1/
   credentials:
     source: Secret
     secretRef:
@@ -292,7 +292,8 @@ account.
 automatically. It must not carry a query or fragment, and the provider does not
 follow redirects: a `url` that answers 3xx fails with a message naming where it
 pointed. `issuerURL` is the issuer published to consumers; it defaults to
-`url` followed by `/auth/v1`, which is only right when consumers reach Rauthy at
+`url` with the `/auth/v1/` path, including the trailing slash reported by
+discovery. This is only right when consumers reach Rauthy at
 the same address as the provider.
 
 ## Examples
