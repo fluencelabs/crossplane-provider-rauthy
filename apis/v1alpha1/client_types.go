@@ -25,7 +25,7 @@ import (
 // A public client that sets its PKCE challenge methods must keep S256 among
 // them. confidential is immutable, so the rule never changes meaning for an
 // existing object.
-// +kubebuilder:validation:XValidation:rule="self.confidential || !has(self.challenges) || 'S256' in self.challenges",message="a public client must keep S256 among its PKCE challenges: leave challenges unset or include S256"
+// +kubebuilder:validation:XValidation:rule="self.confidential || !has(self.challenges) || 'S256' in self.challenges",message="a public client must keep S256 among its PKCE challenges: set challenges explicitly to include S256"
 type ClientParameters struct {
 	// Name is the human-readable name shown on the login page.
 	// +optional

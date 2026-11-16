@@ -2,6 +2,7 @@ package client_test
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -94,5 +95,125 @@ func checkRefusedPKCE(t *testing.T, got *v1alpha1.Client) {
 	}
 	if msg := got.GetCondition(xpv2.TypeSynced).Message; !strings.Contains(msg, "must keep S256") {
 		t.Errorf("Synced message = %q, want the PKCE refusal", msg)
+	}
+}
+
+// Unset challenges preserve Rauthy's methods, so observation must refuse an
+// unsafe public client until an explicit spec repairs it.
+func TestReconcilerPublicUnsetChallengesChecksObserved(t *testing.T) {
+	t.Parallel()
+	for name, methods := range map[string][]string{"empty": {}, "plain": {"plain"}} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeRauthy(t)
+			stored := existing(false)
+			stored.Challenges = methods
+			f.put(stored)
+			h := newHarness(t, f, newClient(owned, public, finalized))
+			got := h.reconcile(t, 3)
+			checkRefusedPKCE(t, got)
+			if reason := got.GetCondition(xpv2.TypeSynced).Reason; reason != xpv2.ReasonReconcileError {
+				t.Errorf("Synced reason = %q, want ReconcileError", reason)
+			}
+			for _, c := range f.callLog() {
+				if !strings.HasPrefix(c, "GET ") {
+					t.Errorf("unexpected call to Rauthy: %s", c)
+				}
+			}
+			// Deletion still finalizes an unsafe owned client.
+			if err := h.kube.Delete(context.Background(), got); err != nil {
+				t.Fatal(err)
+			}
+			if after := h.reconcile(t, 3); after != nil {
+				t.Error("the Client was not finalized")
+			}
+			if f.stored() != nil {
+				t.Error("the owned Rauthy client was not deleted")
+			}
+		})
+	}
+}
+
+func TestReconcilerPKCEAllowedAndRepair(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name         string
+		confidential bool
+		observed     []string
+		specified    []string
+	}{
+		{"public observed S256", false, []string{"S256"}, nil},
+		{"public explicit repair", false, []string{}, []string{"S256", "plain"}},
+		{"confidential empty", true, []string{}, []string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeRauthy(t)
+			stored := existing(tc.confidential)
+			stored.Challenges = tc.observed
+			f.put(stored)
+			h := newHarness(t, f, newClient(func(cr *v1alpha1.Client) {
+				cr.Spec.ForProvider.Confidential = tc.confidential
+				cr.Spec.ForProvider.Challenges = tc.specified
+				owned(cr)
+			}))
+			got := h.reconcile(t, 5)
+			if conditionStatus(got, xpv2.TypeReady) != "True" || conditionStatus(got, xpv2.TypeSynced) != "True" {
+				t.Fatalf("conditions %+v; want Ready and Synced", got.Status.Conditions)
+			}
+			if tc.specified != nil && !slices.Equal(f.stored().Challenges, tc.specified) {
+				t.Errorf("stored challenges = %v, want %v", f.stored().Challenges, tc.specified)
+			}
+		})
+	}
+}
+
+func TestReconcilerPublicUnsetChallengesDriftClearsReady(t *testing.T) {
+	t.Parallel()
+	f := newFakeRauthy(t)
+	stored := existing(false)
+	stored.Challenges = []string{"S256"}
+	f.put(stored)
+	h := newHarness(t, f, newClient(owned, public, finalized))
+	if got := h.reconcile(t, 3); conditionStatus(got, xpv2.TypeReady) != "True" {
+		t.Fatalf("setup: conditions %+v, want Ready", got.Status.Conditions)
+	}
+	stored.Challenges = []string{}
+	f.put(stored)
+	checkRefusedPKCE(t, h.reconcile(t, 2))
+	// Only an explicit S256 list repairs the observed methods.
+	got := h.reconcile(t, 0)
+	got.Spec.ForProvider.Challenges = []string{"S256"}
+	if err := h.kube.Update(context.Background(), got); err != nil {
+		t.Fatal(err)
+	}
+	if got = h.reconcile(t, 3); conditionStatus(got, xpv2.TypeReady) != "True" {
+		t.Fatalf("after repair: conditions %+v, want Ready", got.Status.Conditions)
+	}
+	if !slices.Equal(f.stored().Challenges, []string{"S256"}) {
+		t.Errorf("stored challenges = %v, want [S256]", f.stored().Challenges)
+	}
+}
+
+func TestUpdatePublicUnsetChallengesChecksObserved(t *testing.T) {
+	t.Parallel()
+	f := newFakeRauthy(t)
+	stored := existing(false)
+	stored.Challenges = []string{}
+	f.put(stored)
+	cr := newClient(owned, public)
+	if _, err := newExternal(
+		t,
+		f,
+		cr,
+	).Update(context.Background(), cr); err == nil ||
+		!strings.Contains(err.Error(), "must keep S256") {
+		t.Fatalf("Update error = %v, want the PKCE refusal", err)
+	}
+	for _, c := range f.callLog() {
+		if !strings.HasPrefix(c, "GET ") {
+			t.Errorf("unexpected call to Rauthy: %s", c)
+		}
 	}
 }

@@ -21,7 +21,7 @@ import (
 
 // existing returns a client as it sits in Rauthy, matching newClient's spec.
 func existing(confidential bool) *rauthy.ClientResponse {
-	return &rauthy.ClientResponse{
+	c := &rauthy.ClientResponse{
 		ID:                  testID,
 		Name:                new("My App"),
 		Enabled:             true,
@@ -35,6 +35,10 @@ func existing(confidential bool) *rauthy.ClientResponse {
 		Scopes:              []string{"openid", "email"},
 		DefaultScopes:       []string{"openid"},
 	}
+	if !confidential {
+		c.Challenges = []string{"S256"}
+	}
+	return c
 }
 
 func TestObserve(t *testing.T) {

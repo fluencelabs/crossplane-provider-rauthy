@@ -208,8 +208,9 @@ the main resource, so a manifest cannot carry ownership. What it does rely on:
   methods for it. The provider refuses that: a public `Client` whose
   `challenges` is set must include `S256` (the API server refuses it at
   admission, and the controller refuses an object stored before that rule).
-  Leaving `challenges` unset keeps what Rauthy holds, so set it explicitly to
-  be sure. Whether Rauthy itself enforces PKCE at login for a public client
+  Leaving `challenges` unset keeps what Rauthy holds. If those methods lack
+  `S256`, reconciliation fails until `challenges` explicitly includes `S256`.
+  Whether Rauthy itself enforces PKCE at login for a public client
   without challenge methods has not been verified.
 - **Status is not backed up reliably.** Restoring a `Client` from a backup or
   re-applying it from Git recreates it without `status.ownership`. The resource
@@ -416,11 +417,13 @@ to keep what Rauthy holds, or list the scopes explicitly.
 
 From the release after v0.1.1, a public `Client` (`confidential: false`) whose
 `challenges` is set without `S256` (for example `[]` or `[plain]`) is refused at
-admission. To fix an object stored before the upgrade, add `S256` to
-`challenges` or remove the field (to keep what Rauthy holds), in the same edit
+admission. To fix an object stored before the upgrade, explicitly include
+`S256` in `challenges` (for example `challenges: ["S256"]`), in the same edit
 as any other change to its `forProvider`: the rule sits on `forProvider`, so
 the API server refuses every edit of `forProvider` with that message until
-`challenges` is fixed. Until then the object is not rewritten: the provider
+`challenges` is fixed. An omitted or null `challenges` field also fails
+reconciliation if the observed Rauthy methods lack `S256`. Until then the
+object is not rewritten: the provider
 reports `a public client must keep S256 among its PKCE challenges` on its
 `Synced` condition and sends nothing of its spec to Rauthy, so the Rauthy
 client keeps its current settings. Status and metadata writes and deletion

@@ -45,8 +45,8 @@ var (
 			"the provider",
 	)
 	errPublicWithoutS256 = errors.New(
-		"a public client must keep S256 among its PKCE challenges: leave challenges unset or include S256; " +
-			"this spec was stored before the CRD refused it, so nothing of it is sent to Rauthy until it is fixed",
+		"a public client must keep S256 among its PKCE challenges: set challenges explicitly to include S256; " +
+			"nothing of this spec is sent to Rauthy until it is fixed",
 	)
 	errPoliciesNoUpdate = errors.New(
 		"lack Update: the client can only be brought to the spec by an update, so Update (or *) is required",
@@ -138,7 +138,8 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Client) (managed.Ex
 		if err := checkPolicies(cr, ownedClientID(cr) != ""); err != nil {
 			return managed.ExternalObservation{}, err
 		}
-		if err := checkPKCE(&cr.Spec.ForProvider); err != nil {
+		if err := checkPKCE(&cr.Spec.ForProvider, nil); err != nil {
+			cr.SetConditions(xpv2.Unavailable())
 			return managed.ExternalObservation{}, err
 		}
 	}
@@ -242,6 +243,10 @@ func (e *external) observeOwned(
 	if err := checkConfidential(cr, got); err != nil {
 		return managed.ExternalObservation{}, err
 	}
+	if err := checkPKCE(&cr.Spec.ForProvider, got); err != nil {
+		cr.SetConditions(xpv2.Unavailable())
+		return managed.ExternalObservation{}, err
+	}
 
 	details := e.connectionDetails(got, secret)
 
@@ -341,6 +346,9 @@ func (e *external) Update(ctx context.Context, cr *v1alpha1.Client) (managed.Ext
 	if err = checkConfidential(cr, got); err != nil {
 		return managed.ExternalUpdate{}, err
 	}
+	if err = checkPKCE(&cr.Spec.ForProvider, got); err != nil {
+		return managed.ExternalUpdate{}, err
+	}
 
 	updated, err := e.api.UpdateClient(ctx, id, updateRequest(id, &cr.Spec.ForProvider, got))
 	if err != nil {
@@ -409,11 +417,20 @@ func checkConfidential(cr *v1alpha1.Client, got *rauthy.ClientResponse) error {
 	return nil
 }
 
-// checkPKCE refuses a public client whose challenge methods are set without
-// S256. The CRD refuses such a spec too; this covers objects stored before it
-// did.
-func checkPKCE(p *v1alpha1.ClientParameters) error {
-	if p.Confidential || p.Challenges == nil || slices.Contains(p.Challenges, pkceS256) {
+// checkPKCE refuses public clients without S256. Unset methods preserve the
+// observed methods; before creation there are no observed methods to check.
+func checkPKCE(p *v1alpha1.ClientParameters, got *rauthy.ClientResponse) error {
+	if p.Confidential {
+		return nil
+	}
+	methods := p.Challenges
+	if methods == nil {
+		if got == nil {
+			return nil
+		}
+		methods = got.Challenges
+	}
+	if slices.Contains(methods, pkceS256) {
 		return nil
 	}
 	return errPublicWithoutS256
