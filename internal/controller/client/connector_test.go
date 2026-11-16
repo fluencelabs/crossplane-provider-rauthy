@@ -67,10 +67,10 @@ func TestConnect(t *testing.T) {
 		wantIssuer string
 	}{
 		"DefaultIssuer": {
-			reason:     "The issuer defaults to the Rauthy URL plus /auth/v1, and the trimmed key is sent.",
+			reason:     "The issuer defaults to the Rauthy URL plus /auth/v1/, and the trimmed key is sent.",
 			objects:    []runtime.Object{providerConfig(f.srv.URL+"/", nil), apiKeySecret()},
 			cr:         newClient(owned, public, withConfigRef("ClusterProviderConfig")),
-			wantIssuer: f.srv.URL + "/auth/v1",
+			wantIssuer: f.srv.URL + "/auth/v1/",
 		},
 		"ExplicitIssuer": {
 			reason:     "An explicit issuerURL is published as is.",

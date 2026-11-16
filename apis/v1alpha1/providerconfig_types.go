@@ -27,9 +27,9 @@ type ClusterProviderConfigSpec struct {
 	URL string `json:"url"`
 
 	// IssuerURL is the OIDC issuer published to consumers in the connection
-	// details of every Client. Defaults to URL followed by /auth/v1, which is
-	// only right when consumers reach Rauthy at the same address as the
-	// provider; set it to the public issuer otherwise.
+	// details of every Client. Defaults to URL followed by /auth/v1/, the issuer
+	// Rauthy discovery reports. That is only right when consumers reach Rauthy
+	// at the same address as the provider; set it to the public issuer otherwise.
 	// +optional
 	// +kubebuilder:validation:Pattern=`^https?://`
 	IssuerURL *string `json:"issuerURL,omitempty"`

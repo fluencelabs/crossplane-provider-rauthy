@@ -16,8 +16,8 @@ metadata:
   name: default
 spec:
   url: http://rauthy.rauthy.svc.cluster.local:8080
-  # The issuer consumers see. Without it, url + /auth/v1 is published.
-  issuerURL: https://auth.example.com/auth/v1
+  # The issuer consumers see. Without it, url + /auth/v1/ is published.
+  issuerURL: https://auth.example.com/auth/v1/
   credentials:
     source: Secret
     secretRef:

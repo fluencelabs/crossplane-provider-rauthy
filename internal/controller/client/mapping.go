@@ -116,16 +116,16 @@ func observation(obs *rauthy.ClientResponse) v1alpha1.ClientObservation {
 }
 
 // issuerFor returns the issuer published to consumers: the configured one, or
-// the Rauthy URL with its API base path.
+// the Rauthy URL with its API base path and discovery issuer trailing slash.
 func issuerFor(url string, issuer *string) string {
 	if issuer != nil && *issuer != "" {
 		return *issuer
 	}
 	base := strings.TrimRight(url, "/")
 	if strings.HasSuffix(base, rauthy.APIBasePath) {
-		return base
+		return base + "/"
 	}
-	return base + rauthy.APIBasePath
+	return base + rauthy.APIBasePath + "/"
 }
 
 // orString resolves an optional string: unset keeps observed, "" clears it.
