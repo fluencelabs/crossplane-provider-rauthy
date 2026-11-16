@@ -21,6 +21,11 @@ import (
 // default scope. The other optional lists carry no omitempty, so that an empty
 // list survives being written back to the API server instead of turning into
 // "unset".
+//
+// A public client that sets its PKCE challenge methods must keep S256 among
+// them. confidential is immutable, so the rule never changes meaning for an
+// existing object.
+// +kubebuilder:validation:XValidation:rule="self.confidential || !has(self.challenges) || 'S256' in self.challenges",message="a public client must keep S256 among its PKCE challenges: leave challenges unset or include S256"
 type ClientParameters struct {
 	// Name is the human-readable name shown on the login page.
 	// +optional
@@ -100,10 +105,8 @@ type ClientParameters struct {
 	// +listType=set
 	DefaultScopes []string `json:"defaultScopes,omitempty"`
 
-	// Challenges are the accepted PKCE challenge methods. Rauthy accepts and
-	// stores an empty list for a public client; whether it still enforces PKCE
-	// for that client at login has not been verified. Keep S256 in the list for
-	// public clients.
+	// Challenges are the accepted PKCE challenge methods. For a public client,
+	// a set list must include S256: an empty list or plain alone is refused.
 	// +optional
 	// +kubebuilder:validation:items:Enum=plain;S256
 	// +listType=set

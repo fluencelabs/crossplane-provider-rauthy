@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -42,6 +43,10 @@ var (
 	errCRDLacksOwnership = errors.New(
 		"the installed Client CRD does not keep status.ownership; upgrade the provider's CRDs and restart " +
 			"the provider",
+	)
+	errPublicWithoutS256 = errors.New(
+		"a public client must keep S256 among its PKCE challenges: leave challenges unset or include S256; " +
+			"this spec was stored before the CRD refused it, so nothing of it is sent to Rauthy until it is fixed",
 	)
 	errPoliciesNoUpdate = errors.New(
 		"lack Update: the client can only be brought to the spec by an update, so Update (or *) is required",
@@ -131,6 +136,9 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Client) (managed.Ex
 	}
 	if !meta.WasDeleted(cr) {
 		if err := checkPolicies(cr, ownedClientID(cr) != ""); err != nil {
+			return managed.ExternalObservation{}, err
+		}
+		if err := checkPKCE(&cr.Spec.ForProvider); err != nil {
 			return managed.ExternalObservation{}, err
 		}
 	}
@@ -400,6 +408,18 @@ func checkConfidential(cr *v1alpha1.Client, got *rauthy.ClientResponse) error {
 	}
 	return nil
 }
+
+// checkPKCE refuses a public client whose challenge methods are set without
+// S256. The CRD refuses such a spec too; this covers objects stored before it
+// did.
+func checkPKCE(p *v1alpha1.ClientParameters) error {
+	if p.Confidential || p.Challenges == nil || slices.Contains(p.Challenges, pkceS256) {
+		return nil
+	}
+	return errPublicWithoutS256
+}
+
+const pkceS256 = "S256"
 
 func diffMessage(fields []string) string {
 	if len(fields) == 0 {
