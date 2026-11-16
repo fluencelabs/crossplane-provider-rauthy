@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1](https://github.com/fluencelabs/crossplane-provider-rauthy/compare/v0.1.0...v0.1.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* **client:** scopes and default scopes cannot be empty ([699ee6d](https://github.com/fluencelabs/crossplane-provider-rauthy/commit/699ee6d1a9b52869f177fbe6bfc15653822b61cd))
+* **client:** scopes and default scopes cannot be empty ([b4c18b4](https://github.com/fluencelabs/crossplane-provider-rauthy/commit/b4c18b4b59d527792cb55e650df98e5e6d850e26))
+
 ## 0.1.0 (2026-11-15)
 
 
