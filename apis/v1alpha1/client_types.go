@@ -100,8 +100,10 @@ type ClientParameters struct {
 	// +listType=set
 	DefaultScopes []string `json:"defaultScopes,omitempty"`
 
-	// Challenges are the accepted PKCE challenge methods. An empty list on a
-	// public client removes PKCE from it, which Rauthy accepts.
+	// Challenges are the accepted PKCE challenge methods. Rauthy accepts and
+	// stores an empty list for a public client; whether it still enforces PKCE
+	// for that client at login has not been verified. Keep S256 in the list for
+	// public clients.
 	// +optional
 	// +kubebuilder:validation:items:Enum=plain;S256
 	// +listType=set

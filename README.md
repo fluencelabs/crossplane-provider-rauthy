@@ -203,10 +203,12 @@ the main resource, so a manifest cannot carry ownership. What it does rely on:
   composes them. Ownership protects existing Rauthy clients, but a tenant who
   can create a `Client` can still create new Rauthy clients with any id that is
   free and any redirect URIs.
-- **Whoever writes a public `Client`'s spec decides its PKCE.** Setting
-  `challenges: []` on a public client removes every PKCE challenge method from
-  it, and Rauthy accepts that; the provider passes it through. Review
-  `challenges` on public clients the way you review `redirectUris`.
+- **Whoever writes a public `Client`'s spec decides its PKCE methods.**
+  Rauthy accepts `challenges: []` for a public client and afterwards stores no
+  challenge methods for it; the provider passes the value through. Whether
+  Rauthy still enforces PKCE for such a client at login has not been verified.
+  Keep `S256` in `challenges` for public clients, and review it the way you
+  review `redirectUris`.
 - **Status is not backed up reliably.** Restoring a `Client` from a backup or
   re-applying it from Git recreates it without `status.ownership`. The resource
   then fails safe: it refuses its own client. To recover, either delete the
@@ -354,7 +356,7 @@ settings listed under "Not yet supported". Only `confidential` and
 | `accessTokenLifetime`    | int      | Seconds, 10 to 86400.                                                      |
 | `scopes`                 | []string | Scopes the client may request. At least one; cannot be cleared.            |
 | `defaultScopes`          | []string | Scopes granted without being requested. At least one; cannot be cleared.   |
-| `challenges`             | []string | PKCE methods, `plain` and `S256`. **Warning:** `[]` on a public client removes PKCE from it, and Rauthy accepts that. |
+| `challenges`             | []string | PKCE methods, `plain` and `S256`. **Warning:** Rauthy accepts and stores `[]` for a public client; whether it still enforces PKCE for that client at login has not been verified. Keep `S256` in the list for public clients. |
 | `forceMfa`               | bool     | Require MFA for logins through this client.                                |
 | `clientUri`              | string   | Informational URI of the application.                                      |
 | `contacts`               | []string | Contacts of the application's maintainers.                                 |
@@ -402,15 +404,34 @@ update fails, the resource still owns the client and keeps retrying it. The
 `Ready` condition is true once the client exists, belongs to the resource and
 matches the spec.
 
+## Upgrading
+
+From the release after v0.1.0, a spec with `scopes: []` or `defaultScopes: []`
+is refused at admission. Such a value never took effect: Rauthy replaced it
+with its default scope, and the resource kept reporting drift. Remove the field
+to keep what Rauthy holds, or list the scopes explicitly.
+
 ## Rauthy versions
 
-The wire types (through rauthy-go) mirror Rauthy 0.36.2. Against 0.35.2 the
-managed `Client` fields behave the same. The four settings the provider
-preserves but does not manage (`allowed_resources`, `default_aud`, `claims`,
-`claims_at_root`) are not stored by 0.35.2 at all: it accepts them in an update
-and drops them, and never reports them. The API key needs the `Clients` and
-`Secrets` access groups. This was observed against throwaway containers of
-both versions.
+The wire types (through rauthy-go) mirror Rauthy 0.36.2. The API key needs the
+`Clients` and `Secrets` access groups.
+
+The following was observed by running the provider's requests against
+throwaway containers of Rauthy 0.35.2 and 0.36.2, with the same results on
+both unless noted:
+
+- The managed `Client` fields behave the same on both versions.
+- An update with an empty `scopes` or `default_scopes` list is accepted and
+  the default scope (`openid`) is stored instead; `null` for either is refused.
+- An update of a public client without challenge methods is accepted and the
+  client afterwards holds none.
+- The four settings the provider preserves but does not manage
+  (`allowed_resources`, `default_aud`, `claims`, `claims_at_root`) are stored
+  by 0.36.2 only: 0.35.2 accepts them in an update, drops them and never
+  reports them.
+
+The provider's own tests do not run against a live Rauthy: they use an
+in-memory fake that reproduces these observations.
 
 ## Not yet supported
 
