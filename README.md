@@ -203,12 +203,14 @@ the main resource, so a manifest cannot carry ownership. What it does rely on:
   composes them. Ownership protects existing Rauthy clients, but a tenant who
   can create a `Client` can still create new Rauthy clients with any id that is
   free and any redirect URIs.
-- **Whoever writes a public `Client`'s spec decides its PKCE methods.**
-  Rauthy accepts `challenges: []` for a public client and afterwards stores no
-  challenge methods for it; the provider passes the value through. Whether
-  Rauthy still enforces PKCE for such a client at login has not been verified.
-  Keep `S256` in `challenges` for public clients, and review it the way you
-  review `redirectUris`.
+- **A public client keeps `S256` among its PKCE methods.** Rauthy accepts
+  `challenges: []` for a public client and afterwards stores no challenge
+  methods for it. The provider refuses that: a public `Client` whose
+  `challenges` is set must include `S256` (the API server refuses it at
+  admission, and the controller refuses an object stored before that rule).
+  Leaving `challenges` unset keeps what Rauthy holds, so set it explicitly to
+  be sure. Whether Rauthy itself enforces PKCE at login for a public client
+  without challenge methods has not been verified.
 - **Status is not backed up reliably.** Restoring a `Client` from a backup or
   re-applying it from Git recreates it without `status.ownership`. The resource
   then fails safe: it refuses its own client. To recover, either delete the
@@ -357,7 +359,7 @@ settings listed under "Not yet supported". Only `confidential` and
 | `accessTokenLifetime`    | int      | Seconds, 10 to 86400.                                                      |
 | `scopes`                 | []string | Scopes the client may request. At least one; cannot be cleared.            |
 | `defaultScopes`          | []string | Scopes granted without being requested. At least one; cannot be cleared.   |
-| `challenges`             | []string | PKCE methods, `plain` and `S256`. **Warning:** Rauthy accepts and stores `[]` for a public client; whether it still enforces PKCE for that client at login has not been verified. Keep `S256` in the list for public clients. |
+| `challenges`             | []string | PKCE methods, `plain` and `S256`. For a public client a set list must include `S256`: `[]` and `[plain]` are refused. |
 | `forceMfa`               | bool     | Require MFA for logins through this client.                                |
 | `clientUri`              | string   | Informational URI of the application.                                      |
 | `contacts`               | []string | Contacts of the application's maintainers.                                 |
@@ -411,6 +413,20 @@ From the release after v0.1.0, a spec with `scopes: []` or `defaultScopes: []`
 is refused at admission. Such a value never took effect: Rauthy replaced it
 with its default scope, and the resource kept reporting drift. Remove the field
 to keep what Rauthy holds, or list the scopes explicitly.
+
+From the release after v0.1.1, a public `Client` (`confidential: false`) whose
+`challenges` is set without `S256` (for example `[]` or `[plain]`) is refused at
+admission. To fix an object stored before the upgrade, add `S256` to
+`challenges` or remove the field (to keep what Rauthy holds), in the same edit
+as any other change to its `forProvider`: the rule sits on `forProvider`, so
+the API server refuses every edit of `forProvider` with that message until
+`challenges` is fixed. Until then the object is not rewritten: the provider
+reports `a public client must keep S256 among its PKCE challenges` on its
+`Synced` condition and sends nothing of its spec to Rauthy, so the Rauthy
+client keeps its current settings. Status and metadata writes and deletion
+still pass, through CRD validation ratcheting (on by default from Kubernetes
+1.30), and deleting such a `Client` still deletes its Rauthy client; on an
+older cluster fix the spec before upgrading.
 
 ## Rauthy versions
 
