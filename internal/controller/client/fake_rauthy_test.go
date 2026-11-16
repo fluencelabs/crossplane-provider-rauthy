@@ -3,6 +3,7 @@ package client_test
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -42,10 +43,12 @@ type fakeRauthy struct {
 	// redirectTo, when set, answers every API request with a 308 to it, as a
 	// proxy in front of Rauthy might.
 	redirectTo string
-	// lastPut is the body of the last PUT /clients/{id}.
-	lastPut *rauthy.UpdateClientRequest
-	authz   string
-	srv     *httptest.Server
+	// lastPut is the body of the last PUT /clients/{id}, and lastPutRaw the
+	// same body as sent.
+	lastPut    *rauthy.UpdateClientRequest
+	lastPutRaw []byte
+	authz      string
+	srv        *httptest.Server
 }
 
 func newFakeRauthy(t *testing.T) *fakeRauthy {
@@ -130,6 +133,22 @@ func (f *fakeRauthy) lastPutBody() *rauthy.UpdateClientRequest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.lastPut
+}
+
+// lastPutField returns one field of the last PUT body exactly as sent, or nil
+// when the body did not carry it.
+func (f *fakeRauthy) lastPutField(t *testing.T, name string) json.RawMessage {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.lastPutRaw == nil {
+		t.Fatal("no PUT was sent")
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(f.lastPutRaw, &body); err != nil {
+		t.Fatalf("parse the PUT body: %v", err)
+	}
+	return body[name]
 }
 
 func (f *fakeRauthy) lastAuthorization() string {
@@ -249,12 +268,30 @@ func (f *fakeRauthy) update(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, http.StatusBadRequest, "rejected")
 		return
 	}
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	var req rauthy.UpdateClientRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err = json.Unmarshal(raw, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	f.lastPut = &req
+	f.lastPutRaw = raw
+	// Like Rauthy, refuse null for the scope lists and store the default
+	// scope for an empty one.
+	if msg := requireArrays(raw, "scopes", "default_scopes"); msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	}
+	if len(req.Scopes) == 0 {
+		req.Scopes = []string{"openid"}
+	}
+	if len(req.DefaultScopes) == 0 {
+		req.DefaultScopes = []string{"openid"}
+	}
 	// Rauthy refuses a PUT without these; an empty value means the caller
 	// forgot to fill an unset field from the observed client.
 	if len(req.FlowsEnabled) == 0 || req.AccessTokenAlg == "" || req.AuthCodeLifetime == 0 {
@@ -290,6 +327,25 @@ func (f *fakeRauthy) update(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	f.clients[id] = c
 	writeJSON(w, c)
+}
+
+// requireArrays returns Rauthy's deserializer error when one of the named
+// fields of a JSON object is missing or not an array, or "".
+func requireArrays(raw []byte, fields ...string) string {
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return err.Error()
+	}
+	for _, name := range fields {
+		v, ok := body[name]
+		if !ok {
+			return "Json deserialize error: missing field `" + name + "`"
+		}
+		if !strings.HasPrefix(strings.TrimSpace(string(v)), "[") {
+			return "Json deserialize error: invalid type: " + string(v) + ", expected a sequence"
+		}
+	}
+	return ""
 }
 
 func (f *fakeRauthy) secret(w http.ResponseWriter, id string) {
