@@ -195,8 +195,17 @@ func (f *fakeRauthy) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "database unavailable")
 		return
 	}
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if msg := requireArrays(raw, "redirect_uris"); msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	}
 	var req rauthy.NewClientRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err = json.Unmarshal(raw, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
