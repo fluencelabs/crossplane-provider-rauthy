@@ -96,8 +96,11 @@ func newEnvSetup(t *testing.T, kc kube.Client) *envSetup {
 		ns: fmt.Sprintf("t%d-%s", n, strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-"))),
 		f:  newFakeRauthy(t),
 	}
-	if len(s.ns) > 63 {
-		s.ns = s.ns[:63]
+	// Room for a suffix such as "-b" that tests append for a second
+	// namespace, within the 63 characters a namespace name may have.
+	const maxLen = 63 - len("-xx")
+	if len(s.ns) > maxLen {
+		s.ns = s.ns[:maxLen]
 	}
 	s.ns = strings.TrimRight(s.ns, "-")
 	s.pc, s.id = s.ns, s.ns

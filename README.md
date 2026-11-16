@@ -430,9 +430,13 @@ both unless noted:
   by 0.36.2 only: 0.35.2 accepts them in an update, drops them and never
   reports them.
 
-On a real cluster the provider has since run against Rauthy 0.35.2: it
-created a client, updated it once and then sent no further updates, stored the
-ownership record and published the connection secret.
+One deployment of the provider on a real cluster, against Rauthy 0.35.2, was
+since observed to: reconcile a claim to `Ready`; create the client once and
+update it once, with no repeated updates; store the ownership record with a
+secret fingerprint; publish the connection secret; and keep the client `Ready`
+after that Rauthy was upgraded to 0.36.2. This is an observation from that
+deployment only; this repository's tests do not reproduce it (the envtest
+suite also uses the in-memory fake Rauthy).
 
 The provider's own tests do not run against a live Rauthy: they use an
 in-memory fake that reproduces these observations.
