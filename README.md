@@ -42,40 +42,99 @@ v2: managed resources are namespaced, so a composite resource can compose a
   be saved. The next observation can mark the `Client` `Ready` if its managed
   fields match. Rauthy handles any subsequent SCIM synchronization. Check SCIM
   in Rauthy even when the `Client` is `Ready`.
+- **Proxy or gateway responses.** A proxy or gateway between the controller and Rauthy must preserve response bodies and status codes. The controller only supports responses that Rauthy itself returns.
 
 ### Clean up an orphaned client
 
-Use the Rauthy instance associated with the `Client`. Look up the id from
-`status.ownership.clientID` or the `crossplane.io/external-name` annotation.
-If they differ, inspect both. A pending create uses a temporary Rauthy display
-name starting with `crossplane-`. If `status.ownership.creationNameHash` is
-available, compare it with the hash of the full display name returned by Rauthy:
+For a terminating `Client`, stop the provider controller before starting.
+Before the provider upgrades to rauthy-go v0.3.3, the controller can treat a
+route HTTP 404 as client absence and finalize deletion. With v0.3.3, a route
+404 without a Rauthy `NotFound` error body does not count as client absence.
+Keep the controller stopped until you have verified the Rauthy response and
+finished cleanup.
+
+Capture the `Client` once. Use this snapshot for the ownership checks and
+the finalizer patch. If the object is already gone, use a saved ownership
+snapshot and skip the patch:
+
+```sh
+client=$(kubectl -n "${NAMESPACE}" get clients.rauthy.fluence.dev "${CLIENT_NAME}" -o json)
+```
+
+Use the Rauthy instance identified by `status.ownership.backend` in that
+snapshot. For the candidate URL, start with the referenced
+`ClusterProviderConfig.spec.url`. Set `RAUTHY_URL` to its scheme, host
+(including any port) and escaped path, omitting userinfo. Keep the host
+spelling, port and path. The commands normalize the API root and print its
+hash followed by the recorded hash. Proceed only if they match:
+
+```sh
+api_url=$RAUTHY_URL
+while [ "${api_url%/}" != "$api_url" ]; do api_url=${api_url%/}; done
+case "$api_url" in
+  */auth/v1) ;;
+  *) api_url="$api_url/auth/v1" ;;
+esac
+backend_hash=$(printf 'rauthy-backend-v1\0%s' "$api_url" | sha256sum)
+printf 'sha256:%s\n' "${backend_hash%% *}"
+printf '%s\n' "$client" | jq -r '.status.ownership.backend'
+```
+
+If the current URL does not match, recover the original URL from configuration
+history, verify its hash, and use credentials for that instance. If the binding
+is missing, or the matching instance or route cannot be verified and reached,
+leave the finalizers in place. A 404 from the current URL is irrelevant if its
+hash does not match.
+
+Look up the id from `status.ownership.clientID` or the
+`crossplane.io/external-name` annotation. If they differ, inspect both on the
+bound instance and use ownership evidence to identify which id belonged to
+this resource. Leave any client owned by another resource alone. For a pending
+create, compare `status.ownership.creationNameHash`, if present, with the hash
+of the full Rauthy display name:
 
 ```sh
 printf 'rauthy-creation-name-v1\0%s' "${RAUTHY_CLIENT_NAME}" | sha256sum
 ```
 
-Do not delete a client that belongs to another resource.
-
-After confirming the orphan, set `RAUTHY_URL` to the Rauthy base URL without a
-trailing slash, supply an API key with `Clients: delete` in `RAUTHY_API_KEY`, and
-set `CLIENT_ID` to the confirmed id:
-
-```sh
-curl --fail-with-body --request DELETE \
-  --header "Authorization: API-Key ${RAUTHY_API_KEY}" \
-  "${RAUTHY_URL}/auth/v1/clients/${CLIENT_ID}"
-```
-
-Let the controller finish deletion. If the Kubernetes `Client` remains
-`Terminating`, wait for the pending request window to elapse, then GET the same
-endpoint using a key with `Clients: read`. Remove finalizers only after that
-GET returns HTTP 404. If you found two candidate ids, confirm both are absent:
+Wait more than 60 seconds after the last possible create request before
+confirming absence. If its timing is unclear, wait after the controller stops.
+If the orphan still exists and you confirmed its ownership, set `CLIENT_ID`
+to its id and load a key with `Clients: delete` into `RAUTHY_API_KEY` with
+shell tracing disabled. Delete it on the verified API root:
 
 ```sh
-kubectl -n "${NAMESPACE}" patch clients.rauthy.fluence.dev "${CLIENT_NAME}" \
-  --type=merge --patch '{"metadata":{"finalizers":[]}}'
+client_url="$api_url/clients/${CLIENT_ID}"
+printf 'Authorization: API-Key %s\n' "$RAUTHY_API_KEY" |
+  curl --path-as-is --fail-with-body --request DELETE --header @- "$client_url"
 ```
+
+With `CLIENT_ID` set to the confirmed id, load a key with `Clients: read` into
+`RAUTHY_API_KEY` and GET the same URL, even if the client was already absent:
+
+```sh
+printf 'Authorization: API-Key %s\n' "$RAUTHY_API_KEY" |
+  curl --path-as-is --silent --show-error --include --header @- "$api_url/clients/${CLIENT_ID}"
+```
+
+Require HTTP 404 with a Rauthy JSON error body containing
+`"error": "NotFound"` and a database no-row message. A route or proxy 404,
+including an empty or HTML body, does not confirm absence. If the snapshot
+has a `metadata.deletionTimestamp`, remove the finalizers only after this
+manual check. Use the same snapshot as a precondition:
+
+```sh
+patch=$(printf '%s\n' "$client" | jq -ce '[
+  {op: "test", path: "/metadata/uid", value: .metadata.uid},
+  {op: "test", path: "/metadata/resourceVersion", value: .metadata.resourceVersion},
+  {op: "remove", path: "/metadata/finalizers"}
+]') &&
+  kubectl -n "${NAMESPACE}" patch clients.rauthy.fluence.dev "${CLIENT_NAME}" \
+    --type=json --patch "$patch"
+```
+
+If a precondition fails, fetch the object again and repeat the ownership and
+absence checks before retrying. Resume the controller after cleanup succeeds.
 
 ## Resources
 
@@ -484,11 +543,23 @@ matches the spec.
 
 ## Upgrading
 
-An upgrade or rollback during pending creation can leave an orphan even if the
-POST is still within the controller's HTTP timeout. Pause changes that create
-clients and let pending creations settle before upgrading or rolling back the
-provider. Run this across all namespaces and proceed only when it succeeds and
-prints no clients:
+An upgrade or rollback during creation can leave an orphan. Before either
+operation, stop submitting new `Client` resources in all namespaces and let
+pending creations settle. Then scale the provider controller Deployment to zero
+and verify its pods have stopped. Alternatively, keep submissions stopped and
+set `crossplane.io/paused: "true"` on every `Client` across all namespaces.
+Wait for each to report `Synced=False` with reason `ReconcilePaused` before
+proceeding. Use the scale-to-zero procedure if the running version cannot
+confirm the pause.
+
+Once reconciliation is stopped, wait more than 60 seconds (the 30-second
+request timeout plus 30 seconds for the queue). This gives in-flight POSTs
+time to settle, including POSTs from older versions that do not record pending
+ownership. Keep submissions and reconciles stopped through the upgrade or
+rollback. If scaling down, make sure the replacement Deployment also stays
+at zero replicas until the change is complete. Run the pending ownership
+check across all namespaces and proceed only when it succeeds and prints no
+clients:
 
 ```sh
 clients=$(kubectl get clients.rauthy.fluence.dev --all-namespaces -o json) &&
@@ -496,7 +567,10 @@ clients=$(kubectl get clients.rauthy.fluence.dev --all-namespaces -o json) &&
   jq -r '.items[] | select(.status.ownership.pending == true) | [.metadata.namespace, .metadata.name] | @tsv'
 ```
 
-If an orphan remains after the change, follow the
+If the check lists any clients, let their reconciles settle with submissions
+still stopped, then repeat the pause and check. After the upgrade or rollback,
+restore controller replicas or remove the pause annotations you added, then
+resume submitting clients. If an orphan remains after the change, follow the
 [cleanup steps](#clean-up-an-orphaned-client).
 
 From the release after v0.1.0, a spec with `scopes: []` or `defaultScopes: []`

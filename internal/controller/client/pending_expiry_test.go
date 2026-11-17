@@ -118,7 +118,7 @@ func TestDirectDeletePendingCreationExpires(t *testing.T) {
 }
 
 func TestReconcilerDeletePendingCreationOnLookupError(t *testing.T) {
-	for _, status := range []int{http.StatusForbidden, http.StatusInternalServerError} {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusInternalServerError} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			testDeletePendingCreationOnLookupError(t, status)
 		})
@@ -226,9 +226,10 @@ func TestDeletePendingCreationUsesHTTPTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The settlement window allows 30s for the request and 30s for the queue.
-	// Leave one second for scheduling and HTTP cleanup when measuring wall time.
-	const requestBudget, maxElapsed = 30 * time.Second, 31 * time.Second
-	ctx, cancel := context.WithTimeout(testCtx, requestBudget+5*time.Second)
+	// Delete also does Kubernetes lookups. Allow five seconds for those,
+	// scheduling, and HTTP cleanup, with a separate parent deadline.
+	const requestBudget, maxElapsed = 30 * time.Second, 35 * time.Second
+	ctx, cancel := context.WithTimeout(testCtx, maxElapsed+5*time.Second)
 	defer cancel()
 	stall.Store(true)
 	started := time.Now()
