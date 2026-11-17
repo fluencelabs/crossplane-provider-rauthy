@@ -7,8 +7,7 @@ import (
 )
 
 // Client rows from rauthy-go v0.2.0 testdata/constraints-cases.json, whose
-// expected values follow live Rauthy 0.36.2 and 0.37.2 results, except
-// comma-containing redirect URIs, which cannot survive CSV storage intact.
+// expected values are the union of live Rauthy 0.36.2 and 0.37.2 results.
 func TestCRDAdmitsSDKConstraints(t *testing.T) {
 	t.Parallel()
 	raw, err := os.ReadFile("testdata/constraints-cases.json")
@@ -48,24 +47,5 @@ func TestCRDAdmitsSDKConstraints(t *testing.T) {
 				t.Fatalf("admit %s=%q: %v, want accepted=%v", field, tc.Value, errs, tc.Expected)
 			}
 		})
-	}
-}
-
-func TestCRDRejectsCommaRedirectURIs(t *testing.T) {
-	t.Parallel()
-	for _, field := range []string{"redirectUris", "postLogoutRedirectUris"} {
-		for _, uri := range []string{"https://app.example/a,b", "https://app.example/a,"} {
-			if errs := admit(t, minimalForProvider(map[string]any{field: []any{uri}})); len(errs) == 0 {
-				t.Errorf("%s admitted comma-containing URI %q", field, uri)
-			}
-		}
-		if errs := admit(
-			t,
-			minimalForProvider(map[string]any{field: []any{"https://app.example/a%2Cb"}}),
-		); len(
-			errs,
-		) != 0 {
-			t.Errorf("%s rejected encoded comma: %v", field, errs)
-		}
 	}
 }

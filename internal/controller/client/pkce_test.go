@@ -267,3 +267,31 @@ func TestReconcilerEarlyRefusalClearsReady(t *testing.T) {
 		})
 	}
 }
+
+// A redirect URI with a comma would come back from Rauthy split in two, so
+// nothing of such a spec is sent.
+func TestReconcilerRefusesCommaRedirectURI(t *testing.T) {
+	t.Parallel()
+	for name, mod := range map[string]func(*v1alpha1.Client){
+		"redirect": func(cr *v1alpha1.Client) {
+			cr.Spec.ForProvider.RedirectURIs = []string{"https://app.example.com/a,b"}
+		},
+		"post-logout": func(cr *v1alpha1.Client) {
+			cr.Spec.ForProvider.PostLogoutRedirectURIs = []string{"https://app.example.com/a,b"}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeRauthy(t)
+			h := newHarness(t, f, newClient(mod))
+			got := h.reconcile(t, 3)
+			if conditionStatus(got, xpv2.TypeSynced) != "False" ||
+				!strings.Contains(got.GetCondition(xpv2.TypeSynced).Message, "must not contain a comma") {
+				t.Fatalf("conditions %+v; want the comma refusal", got.Status.Conditions)
+			}
+			if f.stored() != nil {
+				t.Error("a Rauthy client was created")
+			}
+		})
+	}
+}

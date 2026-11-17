@@ -202,30 +202,22 @@ spec:
                     pattern: ^$|^(?:[a-zA-Z0-9À-ɏ\x{3041}-\x{3096}\x{30A0}-\x{30FF}\x{3400}-\x{4DB5}\x{4E00}-\x{9FCB}\x{F900}-\x{FA6A}\x{2E80}-\x{2FD5}\x{FF66}-\x{FF9F}\x{FFA1}-\x{FFDC}\x{31F0}-\x{31FF}\x{0009}-\x{000D}\x{0085}\p{Zs}\x{2028}\x{2029}()\-]{2,128}|[\p{L}\p{M}\p{N}\p{Zs}()._-]{2,128})$
                     type: string
                   postLogoutRedirectUris:
-                    description: |-
-                      PostLogoutRedirectURIs are the allowed redirect URIs after a logout.
-                      Commas are forbidden because Rauthy stores this list comma-separated.
+                    description: PostLogoutRedirectURIs are the allowed redirect URIs
+                      after a logout.
                     items:
                       pattern: ^[a-zA-Z0-9,.:/_\-&?=~#!$'()*+%@]+$
                       type: string
                     type: array
                     x-kubernetes-list-type: set
-                    x-kubernetes-validations:
-                    - message: post-logout redirect URIs must not contain commas
-                      rule: self.all(uri, !uri.contains(','))
                   redirectUris:
-                    description: |-
-                      RedirectURIs are the allowed redirect URIs. Order does not matter.
-                      Commas are forbidden because Rauthy stores this list comma-separated.
+                    description: RedirectURIs are the allowed redirect URIs. Order
+                      does not matter.
                     items:
                       pattern: ^[a-zA-Z0-9,.:/_\-&?=~#!$'()*+%@]+$
                       type: string
                     minItems: 1
                     type: array
                     x-kubernetes-list-type: set
-                    x-kubernetes-validations:
-                    - message: redirect URIs must not contain commas
-                      rule: self.all(uri, !uri.contains(','))
                   restrictGroupPrefix:
                     description: |-
                       RestrictGroupPrefix restricts logins to users in groups starting with

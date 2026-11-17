@@ -149,7 +149,7 @@
     "field": "redirect_uris",
     "value": "https://example.com/a,b",
     "validator": "URI",
-    "expected": false
+    "expected": true
   },
   {
     "id": "redirect-/cb",
