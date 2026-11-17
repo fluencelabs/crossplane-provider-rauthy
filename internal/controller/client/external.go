@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -118,8 +119,15 @@ func newExternal(
 	issuer string,
 	crd *atomic.Bool,
 ) *external {
+	// rauthy.New has already validated the API root. Rebuild its identity from
+	// only the routing components so credentials never enter Client status.
+	base, err := url.Parse(c.BaseURL())
+	if err != nil {
+		panic("invalid validated Rauthy API root")
+	}
+	identity := (&url.URL{Scheme: base.Scheme, Host: base.Host, Path: base.Path, RawPath: base.RawPath}).String()
 	return &external{
-		api: c, status: status, reader: reader, cache: cache, issuer: issuer, backendURL: c.BaseURL(), crd: crd,
+		api: c, status: status, reader: reader, cache: cache, issuer: issuer, backendURL: identity, crd: crd,
 		log: logging.NewNopLogger(),
 	}
 }
