@@ -47,8 +47,8 @@ var (
 			"delete and recreate the Client to switch",
 	)
 	errCRDLacksOwnership = errors.New(
-		"the installed Client CRD does not keep status.ownership; upgrade the provider's CRDs and restart " +
-			"the provider",
+		"the installed Client CRD does not keep status.ownership or its creation proof; upgrade the provider's CRDs; " +
+			"no further clients are created until the provider restarts with current CRDs",
 	)
 	errPublicWithoutS256 = errors.New(
 		"a public client must keep S256 among its PKCE challenges: set challenges explicitly to include S256; " +
@@ -209,7 +209,8 @@ func (e *external) observe(ctx context.Context, cr *v1alpha1.Client) (managed.Ex
 		}
 		return managed.ExternalObservation{}, notOwnedError(id)
 	}
-	return e.observeOwned(cr, got, secret)
+
+	return e.observeOwned(ctx, cr, got, secret)
 }
 
 // releasable reports whether a resource being deleted owns nothing, so it can
@@ -268,6 +269,7 @@ func (e *external) clearStaleMarker(ctx context.Context, cr *v1alpha1.Client) er
 
 // observeOwned reports a client whose ownership is confirmed.
 func (e *external) observeOwned(
+	ctx context.Context,
 	cr *v1alpha1.Client,
 	got *rauthy.ClientResponse,
 	secret *rauthy.Secret,
@@ -284,9 +286,17 @@ func (e *external) observeOwned(
 		return managed.ExternalObservation{}, err
 	}
 
+	if !needsCreationNameCleanup(cr, got) {
+		if err := e.clearCreationName(ctx, cr); err != nil {
+			return managed.ExternalObservation{}, err
+		}
+	}
 	details := e.connectionDetails(got, secret)
 
 	diff := differences(&cr.Spec.ForProvider, got)
+	if needsCreationNameCleanup(cr, got) {
+		diff = append(diff, "creation name")
+	}
 	if len(diff) == 0 {
 		cr.SetConditions(xpv2.Available())
 	} else {
@@ -322,40 +332,39 @@ func (e *external) Create(ctx context.Context, cr *v1alpha1.Client) (managed.Ext
 	}
 	cr.SetConditions(xpv2.Creating())
 
-	if _, err := e.api.CreateClient(ctx, createRequest(id, &cr.Spec.ForProvider)); err != nil {
-		return managed.ExternalCreation{}, e.createFailed(ctx, id, err)
-	}
-	fingerprint, err := e.bindingFor(ctx, cr, id)
+	name, err := e.beginCreation(ctx, cr, id)
 	if err != nil {
-		cr.Status.Ownership = nil
-		return managed.ExternalCreation{}, e.rollback(ctx, id, err)
-	}
-	if err = e.recordOwnership(ctx, cr, id, fingerprint); err != nil {
 		return managed.ExternalCreation{}, err
 	}
-	return managed.ExternalCreation{}, nil
-}
-
-// bindingFor reads the secret Rauthy issued for the client just created and
-// returns its fingerprint; "" for a public client.
-func (e *external) bindingFor(ctx context.Context, cr *v1alpha1.Client, id string) (string, error) {
-	if !cr.Spec.ForProvider.Confidential {
-		return "", nil
+	req := createRequest(id, &cr.Spec.ForProvider)
+	req.Name = &name
+	if _, err = e.api.CreateClient(ctx, req); err != nil {
+		cause := e.createFailed(ctx, id, err)
+		if isClientError(err) {
+			if clearErr := e.clearOwnership(ctx, cr); clearErr != nil {
+				return managed.ExternalCreation{}, errors.Join(cause, clearErr)
+			}
+		}
+		return managed.ExternalCreation{}, cause
 	}
-	s, err := e.api.GetClientSecret(ctx, id)
+	got, err := e.lookup(ctx, id)
 	if err != nil {
-		return "", fmt.Errorf("cannot read the secret of the new client: %w", err)
+		return managed.ExternalCreation{}, err
 	}
-	if s.Secret == nil {
-		return "", errNoSecret
+	if got == nil {
+		return managed.ExternalCreation{}, errors.New("the newly created client disappeared")
 	}
-	return secretFingerprint(id, *s.Secret), nil
+	o, _, err := e.finishCreation(ctx, cr, got)
+	if err == nil && o != ownedClient {
+		err = otherClientError(id)
+	}
+	return managed.ExternalCreation{}, err
 }
 
 // createFailed explains a failed POST; the outcome is known only here. A
 // client that exists after a refused (4xx) POST belongs to somebody else; one
 // that exists after a transport error or a 5xx may be the product of this
-// very request. Neither is ever claimed.
+// very request. The pending creation proof decides on the next reconcile.
 func (e *external) createFailed(ctx context.Context, id string, postErr error) error {
 	ctx, cancel := detached(ctx)
 	defer cancel()
@@ -384,11 +393,18 @@ func (e *external) Update(ctx context.Context, cr *v1alpha1.Client) (managed.Ext
 		return managed.ExternalUpdate{}, err
 	}
 
-	updated, err := e.api.UpdateClient(ctx, id, updateRequest(id, &cr.Spec.ForProvider, got))
+	req := updateRequest(id, &cr.Spec.ForProvider, got)
+	if needsCreationNameCleanup(cr, got) {
+		req.Name = orString(cr.Spec.ForProvider.Name, nil)
+	}
+	updated, err := e.api.UpdateClient(ctx, id, req)
 	if err != nil {
 		return managed.ExternalUpdate{}, fmt.Errorf("cannot update Rauthy client %q: %w", id, err)
 	}
 
+	if err = e.clearCreationName(ctx, cr); err != nil {
+		return managed.ExternalUpdate{}, err
+	}
 	cr.Status.AtProvider = observation(updated)
 	if len(differences(&cr.Spec.ForProvider, updated)) == 0 {
 		cr.SetConditions(xpv2.Available())
@@ -520,4 +536,18 @@ func checkRedirectURIs(p *v1alpha1.ClientParameters) error {
 		}
 	}
 	return nil
+}
+
+func needsCreationNameCleanup(cr *v1alpha1.Client, got *rauthy.ClientResponse) bool {
+	rec := cr.Status.Ownership
+	return rec != nil && rec.CreationNameHash != "" && creationNameHash(got.Name) == rec.CreationNameHash
+}
+
+func (e *external) clearCreationName(ctx context.Context, cr *v1alpha1.Client) error {
+	if cr.Status.Ownership.CreationNameHash == "" {
+		return nil
+	}
+	want := cr.Status.Ownership.DeepCopy()
+	want.CreationNameHash = ""
+	return e.writeOwnership(ctx, cr, want)
 }

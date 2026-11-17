@@ -164,7 +164,9 @@ func (c *Connector) Connect(
 		return nil, fmt.Errorf("cannot read the Rauthy API key: %w", err)
 	}
 
-	api, err := rauthy.New(pc.Spec.URL, strings.TrimSpace(string(key)))
+	api, err := rauthy.New(pc.Spec.URL, strings.TrimSpace(string(key)),
+		// Reconcile retries must confirm ownership before every write.
+		rauthy.WithRetryPolicy(1, 0, 0))
 	if err != nil {
 		return nil, fmt.Errorf("cannot build the Rauthy client: %w", err)
 	}

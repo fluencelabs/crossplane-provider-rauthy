@@ -442,17 +442,32 @@ spec:
                   clientID:
                     description: ClientID is the id of the Rauthy client this resource
                       created.
+                    minLength: 1
                     type: string
                   createdAt:
-                    description: CreatedAt is when the provider created the client.
+                    description: CreatedAt is when the provider began creating the
+                      client.
                     format: date-time
                     type: string
+                  creationNameHash:
+                    description: |-
+                      CreationNameHash binds a pending create to the random temporary name
+                      sent in POST. Only its SHA-256 is stored, so status readers cannot forge
+                      a matching client. It also identifies the name to clear on first update.
+                    type: string
+                  pending:
+                    description: |-
+                      Pending is true until the random creation name has been verified and
+                      the confidential client's secret fingerprint has been recorded.
+                    type: boolean
                   secretFingerprint:
                     description: |-
                       SecretFingerprint binds the record to the client's secret: the hex
                       SHA-256 of "rauthy-client-secret-v1", the client id and the secret
                       Rauthy issued, separated by NUL bytes. Empty for a public client, which
-                      has no secret. The secret itself is never stored.
+                      has no secret. Pending records carry an impossible-to-match "pending:"
+                      sentinel so pruning the pending fields cannot grant ownership.
+                      The secret itself is never stored.
                     type: string
                 required:
                 - backend

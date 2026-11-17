@@ -75,8 +75,11 @@ func TestCreateRequestFields(t *testing.T) {
 			if got == nil {
 				t.Fatal("client was not created")
 			}
+			if !matchesCreationName(cr, got.Name) {
+				t.Fatal("POST name is not bound by the creation record")
+			}
 			want := rauthy.NewClientRequest{
-				ID: testID, Name: new("My App"), Confidential: confidential,
+				ID: testID, Name: got.Name, Confidential: confidential,
 				RedirectURIs:           cr.Spec.ForProvider.RedirectURIs,
 				PostLogoutRedirectURIs: cr.Spec.ForProvider.PostLogoutRedirectURIs,
 			}
