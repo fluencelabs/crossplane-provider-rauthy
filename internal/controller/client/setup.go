@@ -168,7 +168,11 @@ func (c *Connector) Connect(
 	if err != nil {
 		return nil, fmt.Errorf("cannot build the Rauthy client: %w", err)
 	}
-	e := newExternal(api, c.Kube.Status(), reader, cache, issuerFor(pc.Spec.URL, pc.Spec.IssuerURL), &c.crd)
+	backend, err := backendIdentity(api.BaseURL())
+	if err != nil {
+		return nil, err
+	}
+	e := newExternal(api, c.Kube.Status(), reader, cache, issuerFor(pc.Spec.URL, pc.Spec.IssuerURL), backend, &c.crd)
 	if c.Logger != nil {
 		e.log = c.Logger
 	}

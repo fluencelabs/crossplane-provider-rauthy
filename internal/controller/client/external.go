@@ -109,25 +109,34 @@ func NewExternal(
 	reader kube.Reader,
 	issuer string,
 ) managed.TypedExternalClient[*v1alpha1.Client] {
-	return newExternal(c, status, reader, nil, issuer, &atomic.Bool{})
+	backend, err := backendIdentity(c.BaseURL())
+	if err != nil {
+		panic(err) // rauthy.New accepted this URL, so it parses.
+	}
+	return newExternal(c, status, reader, nil, issuer, backend, &atomic.Bool{})
+}
+
+// backendIdentity names the Rauthy instance in an ownership record: scheme,
+// host and API root path. Userinfo, query and fragment are dropped, so no
+// credential in the ProviderConfig URL reaches Client status, which tenants
+// can read.
+func backendIdentity(base string) (string, error) {
+	u, err := url.Parse(base)
+	if err != nil {
+		return "", fmt.Errorf("cannot parse the Rauthy URL: %w", err)
+	}
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path, RawPath: u.RawPath}).String(), nil
 }
 
 func newExternal(
 	c api,
 	status kube.SubResourceWriter,
 	reader, cache kube.Reader,
-	issuer string,
+	issuer, backend string,
 	crd *atomic.Bool,
 ) *external {
-	// rauthy.New has already validated the API root. Rebuild its identity from
-	// only the routing components so credentials never enter Client status.
-	base, err := url.Parse(c.BaseURL())
-	if err != nil {
-		panic("invalid validated Rauthy API root")
-	}
-	identity := (&url.URL{Scheme: base.Scheme, Host: base.Host, Path: base.Path, RawPath: base.RawPath}).String()
 	return &external{
-		api: c, status: status, reader: reader, cache: cache, issuer: issuer, backendURL: identity, crd: crd,
+		api: c, status: status, reader: reader, cache: cache, issuer: issuer, backendURL: backend, crd: crd,
 		log: logging.NewNopLogger(),
 	}
 }
