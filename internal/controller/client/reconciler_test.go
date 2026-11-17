@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/clock"
 	kube "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -129,6 +130,13 @@ func (c *staleCache) Get(ctx context.Context, key kube.ObjectKey, obj kube.Objec
 
 func newHarness(t *testing.T, f *fakeRauthy, cr *v1alpha1.Client, intercept ...interceptor.Funcs) *harness {
 	t.Helper()
+	return newHarnessWithClock(t, f, cr, nil, intercept...)
+}
+
+func newHarnessWithClock(t *testing.T, f *fakeRauthy, cr *v1alpha1.Client, clk clock.PassiveClock,
+	intercept ...interceptor.Funcs,
+) *harness {
+	t.Helper()
 	bindBackend(f.srv.URL+"/auth/v1", cr)
 	s := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(s); err != nil {
@@ -156,6 +164,7 @@ func newHarness(t *testing.T, f *fakeRauthy, cr *v1alpha1.Client, intercept ...i
 	provider := &logSink{}
 
 	c := &client.Connector{
+		Clock:  clk,
 		Kube:   cache,
 		Reader: uncached,
 		Logger: logging.NewLogrLogger(funcr.New(provider.add, funcr.Options{})),

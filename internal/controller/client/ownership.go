@@ -337,7 +337,7 @@ func (e *external) patchOwnership(
 func sameRecord(stored, want *v1alpha1.ClientOwnership) bool {
 	return stored != nil && stored.ClientID == want.ClientID && stored.Backend == want.Backend &&
 		stored.SecretFingerprint == want.SecretFingerprint && stored.Pending == want.Pending &&
-		stored.CreationNameHash == want.CreationNameHash
+		stored.CreationNameHash == want.CreationNameHash && stored.CreatedAt.Unix() == want.CreatedAt.Unix()
 }
 
 // clearOwnership removes the marker and returns nil only once the API server
@@ -388,7 +388,6 @@ func (e *external) beginCreation(ctx context.Context, cr *v1alpha1.Client, id st
 		marker = &v1alpha1.ClientOwnership{
 			ClientID:          id,
 			Backend:           e.backend,
-			CreatedAt:         metav1.NewTime(time.Now()),
 			SecretFingerprint: "pending:" + rand.Text(),
 			Pending:           true,
 		}
@@ -408,8 +407,11 @@ func (e *external) beginCreation(ctx context.Context, cr *v1alpha1.Client, id st
 		if marker.CreationNameHash != hash {
 			return "", errors.New("cannot reproduce pending creation proof with the current API key")
 		}
-		return name, nil
 	}
+	// Refresh the durable timestamp before every POST, including retries that
+	// reuse the same proof. metav1.Time is stored with second precision.
+	marker = marker.DeepCopy()
+	marker.CreatedAt = metav1.NewTime(e.clock.Now().UTC().Truncate(time.Second))
 	marker.CreationNameHash = hash
 	return name, e.writeOwnership(ctx, cr, marker)
 }
