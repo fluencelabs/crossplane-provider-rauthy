@@ -2,6 +2,7 @@ package client //nolint:testpackage // Exercise the unexported issuer mapping di
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/fluencelabs/rauthy-go"
@@ -66,5 +67,27 @@ func TestScopesWithCommaConverge(t *testing.T) {
 	}
 	if diff := differences(&p, &observed); len(diff) > 0 {
 		t.Fatalf("differences = %v, want none", diff)
+	}
+}
+
+// The backend fingerprint publishes no part of the URL, and userinfo does
+// not change which instance it names.
+func TestBackendIdentityPublishesNoURL(t *testing.T) {
+	t.Parallel()
+	a, err := backendIdentity("https://operator:syntheticpassword@auth.example.com/syntheticprefix/auth/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := backendIdentity("https://auth.example.com/syntheticprefix/auth/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b {
+		t.Errorf("userinfo changed the identity: %q != %q", a, b)
+	}
+	for _, part := range []string{"operator", "syntheticpassword", "auth.example.com", "syntheticprefix"} {
+		if strings.Contains(a, part) {
+			t.Errorf("identity %q contains %q", a, part)
+		}
 	}
 }

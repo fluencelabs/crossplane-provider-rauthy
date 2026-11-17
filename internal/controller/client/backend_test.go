@@ -2,8 +2,13 @@ package client_test
 
 import (
 	"context"
+	"encoding/json"
+	"net/url"
+
 	"strings"
 	"testing"
+
+	"github.com/fluencelabs/rauthy-go"
 
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	kube "sigs.k8s.io/controller-runtime/pkg/client"
@@ -211,7 +216,7 @@ func TestLegacyRecordBindsToCurrentBackend(t *testing.T) {
 	if err := k.Get(ctx, kube.ObjectKeyFromObject(cr), stored); err != nil {
 		t.Fatal(err)
 	}
-	stored.Status.Ownership.BackendURL = ""
+	stored.Status.Ownership.Backend = ""
 	if err := k.Status().Update(ctx, stored); err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +228,99 @@ func TestLegacyRecordBindsToCurrentBackend(t *testing.T) {
 	if err = k.Get(ctx, kube.ObjectKeyFromObject(cr), after); err != nil {
 		t.Fatal(err)
 	}
-	if want := f.srv.URL + "/auth/v1"; after.Status.Ownership == nil || after.Status.Ownership.BackendURL != want {
-		t.Fatalf("stored ownership = %+v, want backendURL %q", after.Status.Ownership, want)
+	want := backendOf(f.srv.URL + "/auth/v1")
+	if after.Status.Ownership == nil || after.Status.Ownership.Backend != want {
+		t.Fatalf("stored ownership = %+v, want backend %q", after.Status.Ownership, want)
+	}
+}
+
+// Credentials may rotate without changing the backend that owns the client.
+func TestOwnershipBackendExcludesCredentials(t *testing.T) {
+	t.Parallel()
+	for _, legacy := range []bool{false, true} {
+		t.Run(map[bool]string{false: "create", true: "legacy binding"}[legacy], func(t *testing.T) {
+			t.Parallel()
+			checkCredentialBackend(t, legacy)
+		})
+	}
+}
+
+func checkCredentialBackend(t *testing.T, legacy bool) {
+	t.Helper()
+	ctx := context.Background()
+	f := newFakeRauthy(t)
+	cr := newClient(public)
+	k := newKube(t, f, cr)
+	if legacy {
+		if err := k.Get(ctx, kube.ObjectKeyFromObject(cr), cr); err != nil {
+			t.Fatal(err)
+		}
+		f.put(existing(false))
+		cr.Status.Ownership = &v1alpha1.ClientOwnership{ClientID: testID}
+		if err := k.Status().Update(ctx, cr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, credentials := range []string{"operator:synthetic-password", "rotated:synthetic-replacement"} {
+		api := credentialAPI(t, f, credentials)
+		e := client.NewExternal(api, k.Status(), k, testIssuer)
+		if !legacy && i == 0 {
+			if _, err := e.Create(ctx, cr); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			obs, err := e.Observe(ctx, cr)
+			if err != nil || !obs.ResourceExists {
+				t.Fatalf("Observe: %+v, %v", obs, err)
+			}
+		}
+		stored := &v1alpha1.Client{}
+		if err := k.Get(ctx, kube.ObjectKeyFromObject(cr), stored); err != nil {
+			t.Fatal(err)
+		}
+		assertCredentialFreeBackend(t, stored, backendOf(f.srv.URL+"/auth/v1"), credentials)
+	}
+}
+
+func credentialAPI(t *testing.T, f *fakeRauthy, credentials string) *rauthy.Client {
+	t.Helper()
+	u, err := url.Parse(f.srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.SplitN(credentials, ":", 2)
+	u.User = url.UserPassword(parts[0], parts[1])
+	api, err := rauthy.New(u.String(), "test$key", rauthy.WithRetryPolicy(1, 0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return api
+}
+
+func assertCredentialFreeBackend(t *testing.T, cr *v1alpha1.Client, want, credentials string) {
+	t.Helper()
+	if cr.Status.Ownership == nil || cr.Status.Ownership.Backend != want {
+		t.Errorf("ownership = %+v, want backend %q", cr.Status.Ownership, want)
+	}
+	status, err := json.Marshal(cr.Status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range strings.SplitN(credentials, ":", 2) {
+		if strings.Contains(string(status), secret) {
+			t.Errorf("status contains URL credential %q", secret)
+		}
+	}
+}
+
+func TestBackendQueryAndFragmentRejected(t *testing.T) {
+	t.Parallel()
+	for _, suffix := range []string{"?token=synthetic-token", "#synthetic-fragment"} {
+		if _, err := rauthy.New(
+			"https://operator:synthetic-password@auth.example.com/auth/v1"+suffix,
+			"test$key",
+		); err == nil {
+			t.Fatal("credential-bearing query or fragment accepted")
+		}
 	}
 }

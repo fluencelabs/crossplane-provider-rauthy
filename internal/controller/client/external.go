@@ -2,9 +2,12 @@ package client
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -87,9 +90,9 @@ type external struct {
 	log logging.Logger
 	// cache looks Clients up by ClientIDIndex; nil sends those lookups to
 	// reader.
-	cache      kube.Reader
-	issuer     string
-	backendURL string
+	cache   kube.Reader
+	issuer  string
+	backend string
 	// crd is set, for the life of the process, once the installed CRD is
 	// found to prune status.ownership.
 	crd *atomic.Bool
@@ -108,18 +111,36 @@ func NewExternal(
 	reader kube.Reader,
 	issuer string,
 ) managed.TypedExternalClient[*v1alpha1.Client] {
-	return newExternal(c, status, reader, nil, issuer, &atomic.Bool{})
+	backend, err := backendIdentity(c.BaseURL())
+	if err != nil {
+		panic(err) // rauthy.New accepted this URL, so it parses.
+	}
+	return newExternal(c, status, reader, nil, issuer, backend, &atomic.Bool{})
+}
+
+// backendIdentity names the Rauthy instance in an ownership record by a hash
+// of its scheme, host and API root path. Userinfo, query and fragment are
+// dropped, and the path is hashed, so nothing of the ProviderConfig URL
+// reaches Client status, which tenants can read.
+func backendIdentity(base string) (string, error) {
+	u, err := url.Parse(base)
+	if err != nil {
+		return "", fmt.Errorf("cannot parse the Rauthy URL: %w", err)
+	}
+	id := (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path, RawPath: u.RawPath}).String()
+	sum := sha256.Sum256([]byte("rauthy-backend-v1\x00" + id))
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
 func newExternal(
 	c api,
 	status kube.SubResourceWriter,
 	reader, cache kube.Reader,
-	issuer string,
+	issuer, backend string,
 	crd *atomic.Bool,
 ) *external {
 	return &external{
-		api: c, status: status, reader: reader, cache: cache, issuer: issuer, backendURL: c.BaseURL(), crd: crd,
+		api: c, status: status, reader: reader, cache: cache, issuer: issuer, backend: backend, crd: crd,
 		log: logging.NewNopLogger(),
 	}
 }

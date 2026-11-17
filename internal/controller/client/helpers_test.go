@@ -145,9 +145,18 @@ func readyStatus(cr *v1alpha1.Client) string {
 	return string(cr.GetCondition(xpv2.TypeReady).Status)
 }
 
-// bindBackend supplies the instance binding of pre-existing ownership fixtures.
-func bindBackend(url string, cr *v1alpha1.Client) {
-	if cr.Status.Ownership != nil && cr.Status.Ownership.BackendURL == "" {
-		cr.Status.Ownership.BackendURL = url
+// bindBackend supplies the instance binding of pre-existing ownership
+// fixtures for the Rauthy API root apiRoot.
+func bindBackend(apiRoot string, cr *v1alpha1.Client) {
+	if cr.Status.Ownership != nil && cr.Status.Ownership.Backend == "" {
+		cr.Status.Ownership.Backend = backendOf(apiRoot)
 	}
+}
+
+// backendOf computes the documented backend fingerprint independently of the
+// code under test: "sha256:" and the hex SHA-256 of "rauthy-backend-v1", NUL
+// and scheme://host/path.
+func backendOf(apiRoot string) string {
+	sum := sha256.Sum256([]byte("rauthy-backend-v1\x00" + apiRoot))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }

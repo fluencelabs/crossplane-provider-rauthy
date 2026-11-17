@@ -176,9 +176,11 @@ type ClientSpec struct {
 // writes it through the status subresource right after Rauthy accepted the
 // create, and treats it as the only evidence that the client is its own.
 type ClientOwnership struct {
-	// BackendURL is the API root of the Rauthy instance that created the client.
-	// Changing the provider config must never transfer ownership to another instance.
-	BackendURL string `json:"backendURL"`
+	// Backend is a fingerprint of the Rauthy instance that created the client:
+	// a hash of its scheme, host and API root path, so no part of the URL, which
+	// may carry a secret prefix, is published in status. Changing the provider
+	// config must never transfer ownership to another instance.
+	Backend string `json:"backend"`
 
 	// ClientID is the id of the Rauthy client this resource created.
 	ClientID string `json:"clientID"`
