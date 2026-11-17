@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/fluencelabs/rauthy-go"
+
 	kube "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
@@ -33,7 +35,8 @@ func TestBackendBindingPrunedCRD(t *testing.T) {
 				t.Fatal("fake client does not support watch")
 			}
 			k = interceptor.NewClient(watcher, prunedBindingReply(t, mode))
-			_, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Observe(ctx, cr)
+			_, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key")).
+				Observe(ctx, cr)
 			want := "CRD"
 			if mode == "concurrent record" {
 				want = "ownership record changed"

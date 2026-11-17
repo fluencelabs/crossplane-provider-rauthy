@@ -62,7 +62,7 @@ func checkUpdate500Recovery(t *testing.T, truncated bool) {
 	})
 	bindBackend(srv.URL+rauthy.APIBasePath, cr)
 	k := newKube(t, f, cr)
-	e := client.NewExternal(api, k.Status(), k, testIssuer)
+	e := client.NewExternal(api, k.Status(), k, testIssuer, rauthy.NewSecret("test$key"))
 
 	_, err = e.Update(ctx, cr)
 	var apiErr *rauthy.APIError

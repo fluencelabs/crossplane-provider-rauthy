@@ -94,9 +94,10 @@ type external struct {
 	log logging.Logger
 	// cache looks Clients up by ClientIDIndex; nil sends those lookups to
 	// reader.
-	cache   kube.Reader
-	issuer  string
-	backend string
+	cache    kube.Reader
+	issuer   string
+	backend  string
+	proofKey rauthy.Secret
 	// crd is set, for the life of the process, once the installed CRD is
 	// found to prune status.ownership.
 	crd *atomic.Bool
@@ -105,18 +106,19 @@ type external struct {
 // NewExternal returns the external client for a Rauthy instance. status writes
 // the Client status subresource, where ownership is recorded; reader must read
 // Clients from the API server without a cache; issuer is published to
-// consumers in the connection details.
+// consumers in the connection details. proofKey is the API key used by c.
 func NewExternal(
 	c *rauthy.Client,
 	status kube.SubResourceWriter,
 	reader kube.Reader,
 	issuer string,
+	proofKey rauthy.Secret,
 ) managed.TypedExternalClient[*v1alpha1.Client] {
 	backend, err := backendIdentity(c.BaseURL().Reveal())
 	if err != nil {
 		panic(err) // rauthy.New accepted this URL, so it parses.
 	}
-	return newExternal(c, status, reader, nil, issuer, backend, &atomic.Bool{})
+	return newExternal(c, status, reader, nil, issuer, backend, proofKey, &atomic.Bool{})
 }
 
 // backendIdentity names the Rauthy instance in an ownership record by a hash
@@ -138,11 +140,12 @@ func newExternal(
 	status kube.SubResourceWriter,
 	reader, cache kube.Reader,
 	issuer, backend string,
+	proofKey rauthy.Secret,
 	crd *atomic.Bool,
 ) *external {
 	return &external{
 		api: c, status: status, reader: reader, cache: cache, issuer: issuer, backend: backend, crd: crd,
-		log: logging.NewNopLogger(),
+		log: logging.NewNopLogger(), proofKey: proofKey,
 	}
 }
 
@@ -247,7 +250,7 @@ func (e *external) lookup(ctx context.Context, id string) (*rauthy.ClientRespons
 	return got, nil
 }
 
-// clearStaleMarker clears a marker the API server holds while no client
+// clearStaleMarker clears a finalized marker the API server holds while no client
 // exists. The cache may lag either way, so the decision comes from an
 // uncached read.
 func (e *external) clearStaleMarker(ctx context.Context, cr *v1alpha1.Client) error {
@@ -263,6 +266,10 @@ func (e *external) clearStaleMarker(ctx context.Context, cr *v1alpha1.Client) er
 	// belongs to a client that still exists under that id.
 	if err = checkRecordID(fresh, meta.GetExternalName(cr)); err != nil {
 		return err
+	}
+	// A 404 cannot rule out a POST that is still committing.
+	if fresh.Status.Ownership.Pending {
+		return nil
 	}
 	return e.clearOwnership(ctx, cr)
 }
@@ -312,7 +319,7 @@ func (e *external) observeOwned(
 }
 
 // Create is only called after Observe found no client and confirmed that the
-// API server holds no marker (S0).
+// API server holds no finalized marker (S0 or SP).
 func (e *external) Create(ctx context.Context, cr *v1alpha1.Client) (managed.ExternalCreation, error) {
 	if err := e.checkBackend(ctx, cr); err != nil {
 		return managed.ExternalCreation{}, err
@@ -339,13 +346,7 @@ func (e *external) Create(ctx context.Context, cr *v1alpha1.Client) (managed.Ext
 	req := createRequest(id, &cr.Spec.ForProvider)
 	req.Name = &name
 	if _, err = e.api.CreateClient(ctx, req); err != nil {
-		cause := e.createFailed(ctx, id, err)
-		if isClientError(err) {
-			if clearErr := e.clearOwnership(ctx, cr); clearErr != nil {
-				return managed.ExternalCreation{}, errors.Join(cause, clearErr)
-			}
-		}
-		return managed.ExternalCreation{}, cause
+		return managed.ExternalCreation{}, e.createFailed(ctx, cr, id, err)
 	}
 	got, err := e.lookup(ctx, id)
 	if err != nil {
@@ -362,16 +363,24 @@ func (e *external) Create(ctx context.Context, cr *v1alpha1.Client) (managed.Ext
 }
 
 // createFailed explains a failed POST; the outcome is known only here. A
-// client that exists after a refused (4xx) POST belongs to somebody else; one
+// client that exists after a refused (4xx) POST may be an earlier late commit; one
 // that exists after a transport error or a 5xx may be the product of this
 // very request. The pending creation proof decides on the next reconcile.
-func (e *external) createFailed(ctx context.Context, id string, postErr error) error {
+func (e *external) createFailed(ctx context.Context, cr *v1alpha1.Client, id string, postErr error) error {
 	ctx, cancel := detached(ctx)
 	defer cancel()
-	if _, getErr := e.api.GetClient(ctx, id); getErr != nil {
+	got, getErr := e.lookup(ctx, id)
+	if getErr != nil || got == nil {
 		return fmt.Errorf("cannot create Rauthy client %q: %w", id, postErr)
 	}
 	if isClientError(postErr) {
+		o, _, err := e.finishCreation(ctx, cr, got)
+		if err != nil {
+			return err
+		}
+		if o == ownedClient {
+			return nil
+		}
 		return refusedError(id, postErr)
 	}
 	return outcomeUnknownError(id, postErr)

@@ -94,7 +94,7 @@ func TestCreate(t *testing.T) {
 			wantOwnedID: testID,
 		},
 		"ServerError": {
-			reason: "A failed POST keeps the pending proof until Observe confirms absence and clears it.",
+			reason: "A failed POST keeps the pending proof across absent observations so retries use the same proof.",
 			cr:     newClient(), failPost: true, wantErr: errors.New("cannot create Rauthy client"),
 			wantCalls: []string{"POST /clients", "GET /clients/app"}, wantOwnedID: testID,
 		},
@@ -163,7 +163,7 @@ func TestCreate(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			base, k, reader := createClients(t, f, tc.cr, tc.intercept, tc.readerFails, tc.cancelOnPatch, cancel)
-			e := client.NewExternal(f.api(t), k.Status(), reader, testIssuer)
+			e := client.NewExternal(f.api(t), k.Status(), reader, testIssuer, rauthy.NewSecret("test$key"))
 
 			_, err := e.Create(ctx, tc.cr)
 
@@ -474,7 +474,8 @@ func TestCreateRecordsBinding(t *testing.T) {
 		f := newFakeRauthy(t)
 		cr := newClient()
 		k := newKube(t, f, cr)
-		if _, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Create(ctx, cr); err != nil {
+		if _, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key")).
+			Create(ctx, cr); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 		got := &v1alpha1.Client{}
@@ -495,7 +496,8 @@ func TestCreateRecordsBinding(t *testing.T) {
 		f := newFakeRauthy(t)
 		cr := newClient(public)
 		k := newKube(t, f, cr)
-		if _, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Create(ctx, cr); err != nil {
+		if _, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key")).
+			Create(ctx, cr); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 		if diff := cmp.Diff([]string{"POST /clients", "GET /clients/app"}, f.callLog()); diff != "" {
@@ -517,7 +519,8 @@ func TestUpdateRefusesConfidentialFlip(t *testing.T) {
 	cr.Status.Ownership = ownership
 	k := newKube(t, f, cr)
 
-	_, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Update(context.Background(), cr)
+	_, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key")).
+		Update(context.Background(), cr)
 
 	checkErr(t, "Update refuses a change of confidentiality", err,
 		errors.New("confidential cannot change after creation"), nil)
@@ -536,7 +539,7 @@ func TestFailedDeleteRetainsOwnership(t *testing.T) {
 	f.failDelete = true
 	cr := newClient(owned, deleting)
 	k := newKube(t, f, cr)
-	e := client.NewExternal(f.api(t), k.Status(), k, testIssuer)
+	e := client.NewExternal(f.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key"))
 	if err := k.Get(ctx, kube.ObjectKeyFromObject(cr), cr); err != nil {
 		t.Fatal(err)
 	}
@@ -557,14 +560,16 @@ func TestFailedDeleteRetainsOwnership(t *testing.T) {
 	if f.stored() == nil {
 		t.Fatal("failed DELETE removed remote client")
 	}
-	obs, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Observe(ctx, stored)
+	obs, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key")).
+		Observe(ctx, stored)
 	if err != nil || !obs.ResourceExists {
 		t.Fatalf("deletion no longer retries: %+v, %v", obs, err)
 	}
 	f.mu.Lock()
 	f.failDelete = false
 	f.mu.Unlock()
-	if _, err = client.NewExternal(f.api(t), k.Status(), k, testIssuer).Delete(ctx, stored); err != nil {
+	if _, err = client.NewExternal(f.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key")).
+		Delete(ctx, stored); err != nil {
 		t.Fatal(err)
 	}
 	if f.stored() != nil || storedOwnership(t, k, cr) != "" {
@@ -579,7 +584,8 @@ func TestCreateDoesNotReplaceExistingRecord(t *testing.T) {
 	k := newKube(t, f, cr)
 	want := cr.Status.Ownership.DeepCopy()
 	want.CreatedAt = metav1.NewTime(want.CreatedAt.Truncate(time.Second))
-	_, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Create(context.Background(), cr)
+	_, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key")).
+		Create(context.Background(), cr)
 	if err == nil {
 		t.Fatal("Create replaced an existing ownership record")
 	}

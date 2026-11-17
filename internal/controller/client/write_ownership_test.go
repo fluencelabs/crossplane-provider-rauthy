@@ -59,21 +59,24 @@ func testWriteOwnership(t *testing.T, method string) {
 	}
 }
 
-func TestReconcilerRollbackKeepsReplacement(t *testing.T) {
+func TestReconcilerCreationFailuresKeepReplacement(t *testing.T) {
 	for _, failBinding := range []bool{false, true} {
-		t.Run(map[bool]string{false: "record", true: "binding"}[failBinding], func(t *testing.T) {
-			testRollbackReplacement(t, failBinding)
+		t.Run(map[bool]string{false: "pending-record", true: "binding"}[failBinding], func(t *testing.T) {
+			testCreationFailureReplacement(t, failBinding)
 		})
 	}
 }
 
-func testRollbackReplacement(t *testing.T, failBinding bool) {
+func testCreationFailureReplacement(t *testing.T, failBinding bool) {
 	t.Helper()
 	f := newFakeRauthy(t)
 	foreign := existing(true)
 	var swapped atomic.Bool
 	h := newHarness(t, f, newClient(), interceptor.Funcs{
-		SubResourcePatch: func(context.Context, kube.Client, string, kube.Object, kube.Patch, ...kube.SubResourcePatchOption) error {
+		SubResourcePatch: func(ctx context.Context, c kube.Client, sub string, obj kube.Object, p kube.Patch, opts ...kube.SubResourcePatchOption) error {
+			if failBinding {
+				return c.SubResource(sub).Patch(ctx, obj, p, opts...)
+			}
 			f.putWithSecret(foreign, "foreign-secret")
 			swapped.Store(true)
 			return errors.New("record refused")
@@ -102,7 +105,7 @@ func testRollbackReplacement(t *testing.T, failBinding bool) {
 	}
 	for _, call := range f.callLog() {
 		if call == "DELETE /clients/app" {
-			t.Error("rollback deleted replacement")
+			t.Error("creation failure deleted replacement")
 		}
 	}
 }

@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -60,7 +61,7 @@ import (
 // Rauthy name. POST sends that name. Pending records permit no publication or
 // mutation until the name is confirmed, the secret is read, and the final
 // binding is durably recorded. Any transient failure resumes on the next
-// reconcile. A missing remote client clears the pending record. A mismatched
+// reconcile. A missing remote client retains the pending record for retry. A mismatched
 // name is refused. The first owned Update restores the requested name.
 //
 // A replacement public client after finalization still follows the documented
@@ -366,23 +367,48 @@ func (e *external) writeOwnership(ctx context.Context, cr *v1alpha1.Client, mark
 	return errCRDLacksOwnership
 }
 
-// beginCreation persists proof before POST. A restart before POST simply finds
-// no remote client and clears it; after POST the random name permits recovery.
+// beginCreation persists proof before POST and reproduces it for retries.
+// The API key keeps status readers from predicting the temporary name.
 func (e *external) beginCreation(ctx context.Context, cr *v1alpha1.Client, id string) (string, error) {
 	fresh, err := e.readFresh(ctx, cr)
 	if err != nil {
 		return "", err
 	}
-	if ownedClientID(fresh) != "" {
-		return "", notOwnedError(id)
+	if e.proofKey.Reveal() == "" {
+		return "", errors.New("the API key is required to derive creation proof")
 	}
 	fresh.DeepCopyInto(cr)
-	name := "crossplane-" + rand.Text()
-	marker := &v1alpha1.ClientOwnership{
-		ClientID: id, Backend: e.backend, CreatedAt: metav1.NewTime(time.Now()),
-		Pending: true, CreationNameHash: creationNameHash(&name),
-		SecretFingerprint: "pending:" + creationNameHash(&name),
+	marker := cr.Status.Ownership
+	if marker != nil && !marker.Pending {
+		return "", notOwnedError(id)
 	}
+	if marker == nil {
+		marker = &v1alpha1.ClientOwnership{
+			ClientID:          id,
+			Backend:           e.backend,
+			CreatedAt:         metav1.NewTime(time.Now()),
+			SecretFingerprint: "pending:" + rand.Text(),
+			Pending:           true,
+		}
+	}
+	mac := hmac.New(sha256.New, []byte(e.proofKey.Reveal()))
+	fmt.Fprintf(
+		mac,
+		"rauthy-creation-name-v1\x00%s\x00%s\x00%s\x00%s",
+		cr.UID,
+		e.backend,
+		id,
+		marker.SecretFingerprint,
+	)
+	name := "crossplane-" + hex.EncodeToString(mac.Sum(nil))
+	hash := creationNameHash(&name)
+	if cr.Status.Ownership != nil {
+		if marker.CreationNameHash != hash {
+			return "", errors.New("cannot reproduce pending creation proof with the current API key")
+		}
+		return name, nil
+	}
+	marker.CreationNameHash = hash
 	return name, e.writeOwnership(ctx, cr, marker)
 }
 
