@@ -3,6 +3,7 @@ package client_test
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -362,20 +363,36 @@ func TestObserve(t *testing.T) {
 
 func TestObserveFillsAtProvider(t *testing.T) {
 	t.Parallel()
-	f := newFakeRauthy(t)
-	f.put(existing(true))
-	cr := newClient(owned)
+	for _, forceMFA := range []bool{false, true} {
+		t.Run(strconv.FormatBool(forceMFA), func(t *testing.T) {
+			t.Parallel()
+			f := newFakeRauthy(t)
+			remote := existing(true)
+			remote.ForceMFA = forceMFA
+			f.put(remote)
+			cr := newClient(owned)
+			cr.Status.AtProvider.ForceMFA = !forceMFA
 
-	if _, err := newExternal(t, f, cr).Observe(context.Background(), cr); err != nil {
-		t.Fatalf("Observe: %v", err)
-	}
+			obs, err := newExternal(t, f, cr).Observe(context.Background(), cr)
+			if err != nil {
+				t.Fatalf("Observe: %v", err)
+			}
 
-	got := cr.Status.AtProvider
-	if diff := cmp.Diff(existing(true).RedirectURIs, got.RedirectURIs); diff != "" {
-		t.Errorf("observed redirect URIs (-want +got):\n%s", diff)
-	}
-	if got.ID != testID || got.AccessTokenAlg != "EdDSA" || got.AccessTokenLifetime != 1800 || !got.Confidential {
-		t.Errorf("status.atProvider does not carry the observed client: %+v", got)
+			got := cr.Status.AtProvider
+			if diff := cmp.Diff(existing(true).RedirectURIs, got.RedirectURIs); diff != "" {
+				t.Errorf("observed redirect URIs (-want +got):\n%s", diff)
+			}
+			if got.ID != testID || got.AccessTokenAlg != "EdDSA" ||
+				got.AccessTokenLifetime != 1800 || !got.Confidential {
+				t.Errorf("status.atProvider does not carry the observed client: %+v", got)
+			}
+			if got.ForceMFA != forceMFA {
+				t.Errorf("status.atProvider.forceMfa = %t, want %t", got.ForceMFA, forceMFA)
+			}
+			if !obs.ResourceExists || !obs.ResourceUpToDate || readyStatus(cr) != "True" {
+				t.Errorf("Observe = %+v, Ready = %q, want an existing, up-to-date, Ready client", obs, readyStatus(cr))
+			}
+		})
 	}
 }
 
