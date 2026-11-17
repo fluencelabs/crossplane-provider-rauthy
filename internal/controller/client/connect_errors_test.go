@@ -50,15 +50,18 @@ func TestReconcilerURLWithQuery(t *testing.T) {
 
 	got := reconcileOnce(t, h)
 
-	checkSyncedMessage(t, got, `connect failed: cannot build the Rauthy client: rauthy url "`+
-		f.srv.URL+`/?tenant=a" must not carry a query or fragment`)
+	checkSyncedMessage(
+		t,
+		got,
+		`connect failed: cannot build the Rauthy client: rauthy url must not carry a query or fragment`,
+	)
 	if calls := f.callLog(); len(calls) != 0 {
 		t.Errorf("Rauthy was called: %v", calls)
 	}
 }
 
-// A Rauthy URL that answers 3xx is not followed: the resource names where it
-// pointed, and the request is not retried.
+// A Rauthy URL that answers 3xx is not followed: the resource names the host it
+// pointed to, and the request is not retried.
 func TestReconcilerRedirectRefused(t *testing.T) {
 	t.Parallel()
 	f := newFakeRauthy(t)
@@ -68,11 +71,66 @@ func TestReconcilerRedirectRefused(t *testing.T) {
 	got := reconcileOnce(t, h)
 
 	checkSyncedMessage(t, got, `observe failed: cannot get Rauthy client "app": GET /clients/app: HTTP 308: `+
-		`redirect refused: the server pointed to https://login.example.com/auth/v1/clients/app`)
+		`redirect refused: the server pointed to https://login.example.com`)
 	if calls := f.callLog(); len(calls) != 1 {
 		t.Errorf("Rauthy calls = %v, want the one GET", calls)
 	}
 	if events := h.told(t); !strings.Contains(events, "CannotObserveExternalResource") {
 		t.Errorf("no CannotObserveExternalResource event in:\n%s", events)
+	}
+}
+
+func TestReconcilerURLSecrets(t *testing.T) {
+	t.Parallel()
+	for _, scenario := range []string{"query", "fragment", "transport"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeRauthy(t)
+			h := newHarness(t, f, newClient())
+			pc := &v1alpha1.ClusterProviderConfig{}
+			if err := h.kube.Get(context.Background(), kube.ObjectKey{Name: "default"}, pc); err != nil {
+				t.Fatal(err)
+			}
+			switch scenario {
+			case "query":
+				pc.Spec.URL = f.srv.URL + "/?token=query-secret"
+			case "fragment":
+				pc.Spec.URL = f.srv.URL + "/#fragment-secret"
+			case "transport":
+				pc.Spec.URL = strings.Replace(
+					f.srv.URL,
+					"://",
+					"://private-user:private-password@",
+					1,
+				) + "/private-path"
+				f.srv.Close()
+			}
+			if err := h.kube.Update(context.Background(), pc); err != nil {
+				t.Fatal(err)
+			}
+			stage := "connect failed:"
+			if scenario == "transport" {
+				stage = "observe failed:"
+			}
+			checkURLSecretFailure(t, h, stage)
+			if calls := f.callLog(); len(calls) != 0 {
+				t.Errorf("Rauthy was called: %v", calls)
+			}
+		})
+	}
+}
+
+func checkURLSecretFailure(t *testing.T, h *harness, stage string) {
+	t.Helper()
+	got := reconcileOnce(t, h)
+	condition := got.GetCondition(xpv2.TypeSynced)
+	if condition.Status != "False" || !strings.HasPrefix(condition.Message, stage) {
+		t.Fatalf("Synced = %+v, want False with %q", condition, stage)
+	}
+	told := h.told(t) + h.provider.all()
+	for _, secret := range []string{"query-secret", "fragment-secret", "private-user", "private-password", "private-path"} {
+		if strings.Contains(told, secret) {
+			t.Errorf("reconciler exposed %q in conditions, events or logs", secret)
+		}
 	}
 }

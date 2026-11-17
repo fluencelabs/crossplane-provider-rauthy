@@ -369,7 +369,7 @@ func (f *fakeRauthy) secret(w http.ResponseWriter, id string) {
 	}
 	resp := rauthy.ClientSecretResponse{ID: id, Confidential: c.Confidential}
 	if c.Confidential {
-		s := f.secrets[id]
+		s := rauthy.NewSecret(f.secrets[id])
 		resp.Secret = &s
 	}
 	writeJSON(w, resp)
