@@ -14,6 +14,7 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/ratelimiter"
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	kube "sigs.k8s.io/controller-runtime/pkg/client"
@@ -24,11 +25,12 @@ import (
 
 // TestEnvControllerLifecycle runs the controller as Setup builds it against
 // the API server: a new Client is created in Rauthy, brought to its spec with
-// one update and published; polling then sends no more updates; deleting the
+// one update and published; polling keeps it in sync; deleting the
 // Client deletes the Rauthy client.
 func TestEnvControllerLifecycle(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
+	const pollInterval = time.Second
 	flags := &feature.Flags{}
 	flags.Enable(feature.EnableBetaManagementPolicies)
 	s := newEnvSetup(t, envKube)
@@ -38,7 +40,7 @@ func TestEnvControllerLifecycle(t *testing.T) {
 		if err := client.Setup(mgr, controller.Options{
 			Logger:                  logging.NewNopLogger(),
 			MaxConcurrentReconciles: 1,
-			PollInterval:            time.Second,
+			PollInterval:            pollInterval,
 			GlobalRateLimiter:       ratelimiter.NewGlobal(10),
 			Features:                flags,
 		}); err != nil {
@@ -76,6 +78,23 @@ func TestEnvControllerLifecycle(t *testing.T) {
 	}
 	if n := countCalls(s.f, "POST /clients"); n != 1 {
 		t.Errorf("%d creates, want 1", n)
+	}
+
+	remote := s.stored()
+	if remote == nil {
+		t.Fatal("Rauthy client disappeared before the drift check")
+	}
+	drifted := *remote
+	drifted.AccessTokenLifetime = 900
+	s.f.putWithSecret(&drifted, s.secret())
+	const repairWindow = 4 * pollInterval
+	driftErr := wait.PollUntilContextTimeout(t.Context(), 100*time.Millisecond, repairWindow, true,
+		func(context.Context) (bool, error) {
+			c := s.stored()
+			return c != nil && c.AccessTokenLifetime == 600, nil
+		})
+	if driftErr != nil {
+		t.Fatalf("polling did not repair Rauthy drift within %s: %v", repairWindow, driftErr)
 	}
 
 	// Within the runtime's creation grace period a client that is gone

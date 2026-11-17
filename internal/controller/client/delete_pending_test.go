@@ -12,6 +12,8 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"k8s.io/utils/clock"
 	clocktest "k8s.io/utils/clock/testing"
+	kube "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/fluencelabs/crossplane-provider-rauthy/apis/v1alpha1"
@@ -29,7 +31,9 @@ func TestReconcilerDeletePendingCreation(t *testing.T) {
 	}
 }
 
-func delayedCreation(t *testing.T, confidential bool, clk clock.PassiveClock) (*harness, *fakeRauthy, func()) {
+func delayedCreation(t *testing.T, confidential bool, clk clock.PassiveClock,
+	intercept ...interceptor.Funcs,
+) (*harness, *fakeRauthy, func()) {
 	t.Helper()
 	f := newFakeRauthy(t)
 	started, release, committed := make(chan struct{}), make(chan struct{}), make(chan struct{})
@@ -50,7 +54,7 @@ func delayedCreation(t *testing.T, confidential bool, clk clock.PassiveClock) (*
 	})
 	h := newHarnessWithClock(t, f, newClient(func(cr *v1alpha1.Client) {
 		cr.Spec.ForProvider.Confidential = confidential
-	}), clk)
+	}), clk, intercept...)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
@@ -157,5 +161,47 @@ func TestDeletePendingCreationWithoutClient(t *testing.T) {
 	}
 	if diff := cmp.Diff([]string{"GET /clients/app"}, f.callLog()); diff != "" {
 		t.Fatalf("Delete mutated an unresolved client: %s", diff)
+	}
+}
+
+func TestReconcilerDeletePendingCreationUsesLookupTime(t *testing.T) {
+	clk := clocktest.NewFakeClock(time.Now().UTC().Truncate(time.Second))
+	var afterLookup func()
+	h, f, commit := delayedCreation(t, true, clk, interceptor.Funcs{
+		Get: func(ctx context.Context, c kube.WithWatch, key kube.ObjectKey, obj kube.Object, opts ...kube.GetOption) error {
+			if _, ok := obj.(*v1alpha1.Client); ok && afterLookup != nil {
+				afterLookup()
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	proof := h.reconcile(t, 0).Status.Ownership.DeepCopy()
+	h.ageCreate(t)
+	if err := h.kube.Delete(t.Context(), h.reconcile(t, 0)); err != nil {
+		t.Fatal(err)
+	}
+	clk.Step(59 * time.Second)
+	f.resetCalls()
+	crossed := false
+	afterLookup = func() {
+		if !crossed && slices.Contains(f.callLog(), "GET /clients/app") {
+			crossed = true
+			commit()
+			clk.Step(2 * time.Second)
+		}
+	}
+	got := h.reconcile(t, 1)
+	afterLookup = nil
+	if !crossed || f.stored() == nil {
+		t.Fatal("late POST did not commit after the deletion lookup")
+	}
+	if got == nil || len(got.Finalizers) == 0 {
+		t.Fatal("Client finalized using a 404 received before expiry")
+	}
+	if diff := cmp.Diff(proof, got.Status.Ownership); diff != "" {
+		t.Fatalf("pending proof changed: %s", diff)
+	}
+	if got = h.reconcile(t, 4); got != nil || f.stored() != nil {
+		t.Fatal("the next reconcile did not delete the late client and finalize")
 	}
 }
