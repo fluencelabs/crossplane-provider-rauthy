@@ -201,11 +201,14 @@ func scopesEqual(desired, observed []string) bool {
 	if len(desired) == 0 {
 		return true
 	}
-	// sanitize_scopes checks the stored CSV for the substring, including in custom scope names.
-	if !strings.Contains(strings.Join(desired, ","), "openid") {
-		desired = append(slices.Clone(desired), "openid")
+	// Rauthy stores the list as one CSV and splits it on read, so a scope
+	// name with a comma comes back as two. sanitize_scopes checks that CSV for
+	// the openid substring, including inside custom scope names.
+	csv := strings.Join(desired, ",")
+	if !strings.Contains(csv, "openid") {
+		csv = "openid," + csv
 	}
-	return setEqual(desired, observed)
+	return setEqual(strings.Split(csv, ","), observed)
 }
 
 // setEqual compares two lists as sets: Rauthy stores these fields without a

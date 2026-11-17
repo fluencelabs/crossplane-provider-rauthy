@@ -54,3 +54,17 @@ func TestNormalizedScopesAndRedirects(t *testing.T) {
 		})
 	}
 }
+
+// Rauthy stores scopes as one CSV and splits it on read, so a scope name
+// with a comma comes back as two. That must still count as converged.
+func TestScopesWithCommaConverge(t *testing.T) {
+	t.Parallel()
+	p := v1alpha1.ClientParameters{Scopes: []string{"team,read"}, DefaultScopes: []string{"team,read"}}
+	observed := rauthy.ClientResponse{
+		Scopes:        []string{"openid", "team", "read"},
+		DefaultScopes: []string{"openid", "team", "read"},
+	}
+	if diff := differences(&p, &observed); len(diff) > 0 {
+		t.Fatalf("differences = %v, want none", diff)
+	}
+}

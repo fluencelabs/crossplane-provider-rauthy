@@ -253,8 +253,10 @@ func (e *external) refusedFor(cr, other *v1alpha1.Client, id string) bool {
 // otherRecord returns a Client among items, other than cr, that records id.
 func otherRecord(items []v1alpha1.Client, cr *v1alpha1.Client, id, backendURL string) *v1alpha1.Client {
 	for i := range items {
+		// A record without a backend URL predates the binding: it was made
+		// through the only backend its resource had, which may be this one.
 		if other := &items[i]; other.GetUID() != cr.GetUID() && ownedClientID(other) == id &&
-			other.Status.Ownership.BackendURL == backendURL {
+			(other.Status.Ownership.BackendURL == backendURL || other.Status.Ownership.BackendURL == "") {
 			return other
 		}
 	}
