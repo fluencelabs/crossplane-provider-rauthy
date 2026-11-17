@@ -54,6 +54,10 @@ var (
 		"a public client must keep S256 among its PKCE challenges: set challenges explicitly to include S256; " +
 			"nothing of this spec is sent to Rauthy until it is fixed",
 	)
+	errURIComma = errors.New(
+		"redirectUris and postLogoutRedirectUris must not contain a comma: Rauthy stores them comma-separated " +
+			"and would split the URI; encode it as %2C",
+	)
 	errPoliciesNoUpdate = errors.New(
 		"lack Update: the client can only be brought to the spec by an update, so Update (or *) is required",
 	)
@@ -175,7 +179,7 @@ func (e *external) observe(ctx context.Context, cr *v1alpha1.Client) (managed.Ex
 		if err := checkPolicies(cr, ownedClientID(cr) != ""); err != nil {
 			return managed.ExternalObservation{}, err
 		}
-		if err := checkPKCE(&cr.Spec.ForProvider, nil); err != nil {
+		if err := checkSpec(&cr.Spec.ForProvider); err != nil {
 			return managed.ExternalObservation{}, err
 		}
 	}
@@ -499,6 +503,29 @@ func checkRecordID(cr *v1alpha1.Client, id string) error {
 			"%w: this resource created client %q but its external name is now %q; restore the external name",
 			errIDChanged, owned, id,
 		)
+	}
+	return nil
+}
+
+// checkSpec refuses a spec that must not reach Rauthy, before anything is
+// observed or sent.
+func checkSpec(p *v1alpha1.ClientParameters) error {
+	if err := checkPKCE(p, nil); err != nil {
+		return err
+	}
+	return checkRedirectURIs(p)
+}
+
+// checkRedirectURIs refuses a redirect URI with a comma before anything is
+// sent: Rauthy stores these lists comma-separated, so such a URI would come
+// back as two and the callback would never match. The CRD cannot refuse it
+// itself: a CEL rule over an unbounded list exceeds the API server's cost
+// budget.
+func checkRedirectURIs(p *v1alpha1.ClientParameters) error {
+	for _, uri := range slices.Concat(p.RedirectURIs, p.PostLogoutRedirectURIs) {
+		if strings.Contains(uri, ",") {
+			return errURIComma
+		}
 	}
 	return nil
 }

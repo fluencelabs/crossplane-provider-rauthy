@@ -520,6 +520,11 @@ func (e *external) bindBackend(ctx context.Context, cr *v1alpha1.Client) error {
 	if err != nil {
 		return fmt.Errorf("cannot bind the ownership record to the Rauthy backend: %w", err)
 	}
+	if stored == nil || (stored.ClientID == rec.ClientID &&
+		stored.SecretFingerprint == rec.SecretFingerprint && stored.Backend == "") {
+		return errors.New("the installed Client CRD does not keep status.ownership.backend; " +
+			"upgrade the provider's CRDs and restart the provider")
+	}
 	if !sameRecord(stored, want) {
 		return errors.New("the ownership record changed while binding it to the Rauthy backend")
 	}

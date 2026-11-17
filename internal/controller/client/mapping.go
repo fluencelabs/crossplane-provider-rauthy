@@ -69,11 +69,10 @@ func differences(p *v1alpha1.ClientParameters, obs *rauthy.ClientResponse) []str
 	check("name", stringEqual(p.Name, obs.Name))
 	check("confidential", p.Confidential == obs.Confidential)
 	check("enabled", valueEqual(p.Enabled, obs.Enabled))
-	check("redirectUris", uriListsEqual(p.RedirectURIs, obs.RedirectURIs))
+	check("redirectUris", setEqual(p.RedirectURIs, obs.RedirectURIs))
 	check(
 		"postLogoutRedirectUris",
-		p.PostLogoutRedirectURIs == nil || nonemptyListEqual(
-			strings.Split(strings.Join(p.PostLogoutRedirectURIs, ","), ","), obs.PostLogoutRedirectURIs),
+		nonemptyListEqual(p.PostLogoutRedirectURIs, obs.PostLogoutRedirectURIs),
 	)
 	check("allowedOrigins", listEqual(p.AllowedOrigins, obs.AllowedOrigins))
 	check("flowsEnabled", listEqual(p.FlowsEnabled, obs.FlowsEnabled))
@@ -221,14 +220,6 @@ func normalise(s []string) []string {
 	out := slices.Clone(s)
 	slices.Sort(out)
 	return slices.Compact(out)
-}
-
-// uriListsEqual accounts for Rauthy's comma-separated URI storage.
-func uriListsEqual(desired, observed []string) bool {
-	if len(desired) == 0 || len(observed) == 0 {
-		return len(desired) == len(observed)
-	}
-	return setEqual(strings.Split(strings.Join(desired, ","), ","), strings.Split(strings.Join(observed, ","), ","))
 }
 
 // nonemptyListEqual drops empty entries, as Rauthy's contact and post-logout URI getters do.
