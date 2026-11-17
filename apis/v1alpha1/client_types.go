@@ -173,8 +173,8 @@ type ClientSpec struct {
 }
 
 // ClientOwnership records the Rauthy client a Client created. The provider
-// writes it through the status subresource right after Rauthy accepted the
-// create, and treats it as the only evidence that the client is its own.
+// writes a pending proof before POST and finalizes it after verifying the
+// created client. Only a finalized record permits normal management.
 type ClientOwnership struct {
 	// Backend is a fingerprint of the Rauthy instance that created the client:
 	// a hash of its scheme, host and API root path, so no part of the URL, which
@@ -186,13 +186,26 @@ type ClientOwnership struct {
 	// +kubebuilder:validation:MinLength=1
 	ClientID string `json:"clientID"`
 
-	// CreatedAt is when the provider created the client.
+	// Pending is true until the random creation name has been verified and
+	// the confidential client's secret fingerprint has been recorded.
+	// +optional
+	Pending bool `json:"pending,omitempty"`
+
+	// CreationNameHash binds a pending create to the random temporary name
+	// sent in POST. Only its SHA-256 is stored, so status readers cannot forge
+	// a matching client. It also identifies the name to clear on first update.
+	// +optional
+	CreationNameHash string `json:"creationNameHash,omitempty"`
+
+	// CreatedAt is when the provider began creating the client.
 	CreatedAt metav1.Time `json:"createdAt"`
 
 	// SecretFingerprint binds the record to the client's secret: the hex
 	// SHA-256 of "rauthy-client-secret-v1", the client id and the secret
 	// Rauthy issued, separated by NUL bytes. Empty for a public client, which
-	// has no secret. The secret itself is never stored.
+	// has no secret. Pending records carry an impossible-to-match "pending:"
+	// sentinel so pruning the pending fields cannot grant ownership.
+	// The secret itself is never stored.
 	// +optional
 	SecretFingerprint string `json:"secretFingerprint,omitempty"`
 }

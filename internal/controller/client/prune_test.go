@@ -61,7 +61,7 @@ func TestReconcilerCRDWithoutOwnershipRealDecode(t *testing.T) {
 			posts++
 		}
 	}
-	if posts != 1 {
-		t.Errorf("%d creates, want 1", posts)
+	if posts != 0 {
+		t.Errorf("%d creates, want 0", posts)
 	}
 }

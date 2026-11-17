@@ -387,8 +387,8 @@ func TestReconcilerStaleCacheDoesNotAdopt(t *testing.T) {
 }
 
 // TestReconcilerUnrecordedCreateLeavesNoOwnership: when the ownership record
-// cannot be written, the new client is deleted again, and the runtime's own
-// status update must not persist a record for it.
+// cannot be written, no POST occurs, and the runtime's own status update
+// must not persist a record for it.
 func TestReconcilerUnrecordedCreateLeavesNoOwnership(t *testing.T) {
 	t.Parallel()
 	f := newFakeRauthy(t)
@@ -408,14 +408,13 @@ func TestReconcilerUnrecordedCreateLeavesNoOwnership(t *testing.T) {
 	if f.stored() != nil {
 		t.Error("the unrecorded client was left in Rauthy")
 	}
-	if msg := got.GetCondition(xpv2.TypeSynced).Message; !strings.Contains(msg, "was deleted again") {
-		t.Errorf("Synced message = %q, want the rollback explained", msg)
+	if msg := got.GetCondition(xpv2.TypeSynced).Message; !strings.Contains(msg, "cannot record ownership") {
+		t.Errorf("Synced message = %q, want the pre-POST refusal explained", msg)
 	}
 }
 
 // TestReconcilerCRDWithoutOwnership: an older CRD prunes status.ownership but
-// the patch still succeeds. The create must be rolled back and the cause
-// named, instead of leaving a client the resource then refuses forever.
+// the patch still succeeds. POST must be prevented and the cause named.
 func TestReconcilerCRDWithoutOwnership(t *testing.T) {
 	t.Parallel()
 	f := newFakeRauthy(t)
@@ -435,7 +434,7 @@ func TestReconcilerCRDWithoutOwnership(t *testing.T) {
 	if !strings.Contains(msg, "does not keep status.ownership") {
 		t.Errorf("Synced message = %q, want the CRD named", msg)
 	}
-	// Creates stop until a restart, so the rollback must not promise one.
+	// Creation stops until a restart, so no recreate may be promised.
 	if strings.Contains(msg, "will be recreated") || !strings.Contains(msg, "until the provider restarts") {
 		t.Errorf("Synced message = %q, want the stop explained and no recreate promised", msg)
 	}
@@ -459,6 +458,12 @@ func TestReconcilerErrorWordingIsStable(t *testing.T) {
 			f := newFakeRauthy(t)
 			setup(f)
 			got := newHarness(t, f, newClient()).reconcile(t, 4)
+			if name == "Ambiguous" {
+				if readyStatus(got) != "True" || got.Status.Ownership == nil || got.Status.Ownership.Pending {
+					t.Fatalf("successful POST with lost response did not recover: %+v", got.Status)
+				}
+				return
+			}
 			if msg := got.GetCondition(xpv2.TypeSynced).Message; !strings.Contains(msg, "holds no ownership record") {
 				t.Errorf("Synced message = %q, want the neutral refusal", msg)
 			}
@@ -527,8 +532,8 @@ func TestReconcilerCRDWithoutOwnershipStopsCreating(t *testing.T) {
 			posts++
 		}
 	}
-	if posts != 1 {
-		t.Errorf("%d creates, want 1", posts)
+	if posts != 0 {
+		t.Errorf("%d creates, want 0", posts)
 	}
 	if msg := got.GetCondition(xpv2.TypeSynced).Message; !strings.Contains(msg, "does not keep status.ownership") {
 		t.Errorf("Synced message = %q, want the CRD named", msg)

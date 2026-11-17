@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -33,14 +34,16 @@ import (
 // one the record names. Every record is bound to the Rauthy API root; a public
 // client has no secret, so its binding is the backend URL and id.
 //
-// Invariant: M names a client id only while this resource's client (C) with
-// that id exists in Rauthy. Every write of M is confirmed by an uncached read
+// A finalized M binds this resource to its client (C). A pending M is only
+// a reservation until its random name is verified. Every write is confirmed
+// by an uncached read
 // when its result is in doubt, and any decision to act as the owner is taken
 // from an uncached read plus, for a confidential client, the fingerprint.
 //
 // States, with M as the API server holds it and C the Rauthy client:
 //
 //	S0   M absent,  C absent      Observe: not exists -> Create.
+//	SP   M pending, C any        Verify creation name, then finalize or refuse.
 //	S1   M absent,  C present     refused: not ours (or a leaked create of ours).
 //	S4   M = id on another Client refused, whatever C is: neither copy may act
 //	                              as the owner, and none may create the id.
@@ -53,29 +56,19 @@ import (
 //	S3   M = id,    C absent      transient: Observe clears M (confirmed)
 //	                              before reporting "not exists".
 //
-// Transitions:
+// Creation first writes a pending record with a hash of a random temporary
+// Rauthy name. POST sends that name. Pending records permit no publication or
+// mutation until the name is confirmed, the secret is read, and the final
+// binding is durably recorded. Any transient failure resumes on the next
+// reconcile. A missing remote client clears the pending record. A mismatched
+// name is refused. The first owned Update restores the requested name.
 //
-//	S0 -> S1   POST succeeds, then the secret cannot be read or M cannot be
-//	           recorded, and the rollback DELETE fails; or the provider stops
-//	           before recording M.
-//	S0 -> S2   POST succeeds, the secret is read and M (id and fingerprint) is
-//	           recorded, confirmed by the patch answer or an uncached read.
-//	S2 -> S3   C deleted, by Delete (which clears M right after the DELETE) or
-//	           out of band (Observe clears M on the 404).
-//	S3 -> S0   M cleared and confirmed.
-//	S2 -> S2'  Out of band: C deleted and recreated by somebody else before
-//	           Observe saw the 404, or its secret rotated.
-//	S2' -> S3  Somebody deletes C in Rauthy.
-//
-// Crash points: before the POST leaves S0; between the POST and M leaves S1
-// (refused until someone deletes C); after M leaves S2; between a DELETE and
-// clearing M leaves S3, which the next Observe repairs. For public clients the
-// S2 -> S2' transition cannot be detected: a recreated public client with the
-// same id looks like S2. For a confidential client it is detected up to one
-// request: Update and Delete confirm the secret right before they write, and
-// Rauthy offers no conditional write to close the gap between the two.
+// A replacement public client after finalization still follows the documented
+// backend-and-id policy. Confidential clients are confirmed by secret before
+// every write; Rauthy has no conditional mutation to close the final read/write
+// gap.
 
-// detachedTimeout bounds the repair calls (re-reads, clears and rollbacks)
+// detachedTimeout bounds the repair calls (re-reads and clears)
 // that run on a context detached from the reconcile, whose deadline is the
 // likeliest reason the first attempt failed.
 const detachedTimeout = 30 * time.Second
@@ -153,6 +146,9 @@ func (e *external) verifyOwner(
 	taken, err := e.recordedElsewhereCached(ctx, fresh, id)
 	if err != nil || taken {
 		return notOwned, nil, err
+	}
+	if rec.Pending {
+		return e.finishCreation(ctx, cr, got)
 	}
 	if !got.Confidential {
 		// A public client has no secret: the binding is the backend URL and id. A
@@ -302,7 +298,12 @@ func (e *external) patchOwnership(
 ) (*v1alpha1.ClientOwnership, bool, error) {
 	desired := cr.DeepCopy()
 	desired.Status.Ownership = want
-	patch, err := kube.MergeFrom(cr).Data(desired)
+	base := kube.MergeFrom(cr)
+	if (want != nil && want.CreationNameHash != "") ||
+		(cr.Status.Ownership != nil && cr.Status.Ownership.CreationNameHash != "") {
+		base = kube.MergeFromWithOptions(cr, kube.MergeFromWithOptimisticLock{})
+	}
+	patch, err := base.Data(desired)
 	if err != nil {
 		return nil, false, fmt.Errorf("cannot build the status.ownership patch: %w", err)
 	}
@@ -323,14 +324,15 @@ func (e *external) patchOwnership(
 			err,
 		)
 	}
-	cr.Status.Ownership = fresh.Status.Ownership
-	return fresh.Status.Ownership, true, patchErr
+	fresh.DeepCopyInto(cr)
+	return cr.Status.Ownership, true, patchErr
 }
 
 // sameRecord reports whether the stored record is the one that was written.
 func sameRecord(stored, want *v1alpha1.ClientOwnership) bool {
 	return stored != nil && stored.ClientID == want.ClientID && stored.Backend == want.Backend &&
-		stored.SecretFingerprint == want.SecretFingerprint
+		stored.SecretFingerprint == want.SecretFingerprint && stored.Pending == want.Pending &&
+		stored.CreationNameHash == want.CreationNameHash
 }
 
 // clearOwnership removes the marker and returns nil only once the API server
@@ -346,42 +348,89 @@ func (e *external) clearOwnership(ctx context.Context, cr *v1alpha1.Client) erro
 	return nil
 }
 
-// recordOwnership records the marker, bound to fingerprint, for a client
-// Rauthy just created.
-//
-//   - Recorded (by the patch answer or an uncached read): success.
-//   - Known not to be recorded: the client is deleted again, so the next
-//     reconcile starts from S0 instead of refusing it forever.
-//   - Unknown: neither delete nor claim. The next Observe decides from an
-//     uncached read: owned if the marker landed, refused otherwise.
-func (e *external) recordOwnership(ctx context.Context, cr *v1alpha1.Client, id, fingerprint string) error {
-	if e.crd.Load() {
-		return errCRDLacksOwnership
-	}
-	marker := &v1alpha1.ClientOwnership{
-		ClientID:          id,
-		Backend:           e.backend,
-		CreatedAt:         metav1.NewTime(time.Now()),
-		SecretFingerprint: fingerprint,
-	}
+// writeOwnership requires confirmation that the complete record survived admission.
+func (e *external) writeOwnership(ctx context.Context, cr *v1alpha1.Client, marker *v1alpha1.ClientOwnership) error {
 	stored, known, err := e.patchOwnership(ctx, cr, marker)
-	switch {
-	case !known:
-		return fmt.Errorf(
-			"created Rauthy client %q but the outcome of recording its ownership is unknown: %w", id, err)
-	case sameRecord(stored, marker):
+	if sameRecord(stored, marker) {
 		return nil
-	case stored != nil:
-		// Something else is recorded: never replace it, never claim.
-		return fmt.Errorf("created Rauthy client %q but another ownership record is stored: %w", id, err)
-	case err == nil:
-		// The patch succeeded and the field is gone: the installed CRD prunes
-		// it. Every further create would end the same way, so stop creating.
-		e.crd.Store(true)
-		err = errCRDLacksOwnership
 	}
-	cr.Status.Ownership = nil
-	return e.rollback(ctx, id, cr.Spec.ForProvider.Confidential, fingerprint, err)
+	if !known {
+		return fmt.Errorf("ownership write outcome is unknown: %w", err)
+	}
+	if err != nil {
+		return fmt.Errorf("cannot record ownership: %w", err)
+	}
+	e.crd.Store(true)
+	return errCRDLacksOwnership
+}
+
+// beginCreation persists proof before POST. A restart before POST simply finds
+// no remote client and clears it; after POST the random name permits recovery.
+func (e *external) beginCreation(ctx context.Context, cr *v1alpha1.Client, id string) (string, error) {
+	fresh, err := e.readFresh(ctx, cr)
+	if err != nil {
+		return "", err
+	}
+	if ownedClientID(fresh) != "" {
+		return "", notOwnedError(id)
+	}
+	fresh.DeepCopyInto(cr)
+	name := "crossplane-" + rand.Text()
+	marker := &v1alpha1.ClientOwnership{
+		ClientID: id, Backend: e.backend, CreatedAt: metav1.NewTime(time.Now()),
+		Pending: true, CreationNameHash: creationNameHash(&name),
+		SecretFingerprint: "pending:" + creationNameHash(&name),
+	}
+	return name, e.writeOwnership(ctx, cr, marker)
+}
+
+func creationNameHash(name *string) string {
+	if name == nil {
+		return ""
+	}
+	sum := sha256.Sum256([]byte("rauthy-creation-name-v1\x00" + *name))
+	return hex.EncodeToString(sum[:])
+}
+
+// finishCreation only binds a secret after confirming the random name from
+// this create. Read failures retain the pending record for the next reconcile.
+func (e *external) finishCreation(
+	ctx context.Context,
+	cr *v1alpha1.Client,
+	got *rauthy.ClientResponse,
+) (owner, *rauthy.Secret, error) {
+	rec := cr.Status.Ownership
+	if rec.CreationNameHash == "" || creationNameHash(got.Name) != rec.CreationNameHash ||
+		got.Confidential != cr.Spec.ForProvider.Confidential {
+		return otherClient, nil, nil
+	}
+	var secret *rauthy.Secret
+	want := rec.DeepCopy()
+	want.SecretFingerprint = ""
+	if got.Confidential {
+		s, err := e.api.GetClientSecret(ctx, rec.ClientID)
+		if err != nil {
+			return notOwned, nil, fmt.Errorf("cannot read the secret of the new client: %w", err)
+		}
+		if s.Secret == nil {
+			return notOwned, nil, errNoSecret
+		}
+		secret = s.Secret
+		want.SecretFingerprint = secretFingerprint(rec.ClientID, *secret)
+		// A replacement during the secret read must not be bound as ours.
+		current, err := e.lookup(ctx, rec.ClientID)
+		if err != nil {
+			return notOwned, nil, err
+		}
+		if current == nil || creationNameHash(current.Name) != rec.CreationNameHash || !current.Confidential {
+			return otherClient, nil, nil
+		}
+	}
+	want.Pending = false
+	if err := e.writeOwnership(ctx, cr, want); err != nil {
+		return notOwned, nil, err
+	}
+	return ownedClient, secret, nil
 }
 
 // secretFingerprint is the binding between a record and a confidential
@@ -393,49 +442,6 @@ func secretFingerprint(id string, secret rauthy.Secret) string {
 }
 
 const fingerprintDomain = "rauthy-client-secret-v1"
-
-// rollback deletes a client whose ownership is known not to be recorded.
-func (e *external) rollback(ctx context.Context, id string, confidential bool, fingerprint string, cause error) error {
-	ctx, cancel := detached(ctx)
-	defer cancel()
-	got, err := e.lookup(ctx, id)
-	if err != nil {
-		return fmt.Errorf("cannot confirm rollback ownership of client %q (%w): %w", id, cause, err)
-	}
-	if got != nil && got.Confidential != confidential {
-		return fmt.Errorf("refusing rollback of replaced client %q: %w", id, cause)
-	}
-	if got != nil && confidential {
-		s, secretErr := e.api.GetClientSecret(ctx, id)
-		if secretErr != nil {
-			return fmt.Errorf("cannot confirm rollback secret of client %q (%w): %w", id, cause, secretErr)
-		}
-		if fingerprint == "" || s.Secret == nil || secretFingerprint(id, *s.Secret) != fingerprint {
-			return fmt.Errorf("refusing rollback of replaced client %q: %w", id, cause)
-		}
-	}
-	if got != nil {
-		if err = e.api.DeleteClient(ctx, id); err != nil && !rauthy.IsNotFound(err) {
-			return fmt.Errorf(
-				"created Rauthy client %q but could not record its ownership (%w), and could not delete it again "+
-					"(%w): the resource will refuse it; delete client %q in Rauthy to retry",
-				id, cause, err, id,
-			)
-		}
-	}
-	if errors.Is(cause, errCRDLacksOwnership) {
-		return fmt.Errorf(
-			"created Rauthy client %q but could not record its ownership, so it was deleted again; no further "+
-				"clients are created until the provider restarts with current CRDs: %w",
-			id, cause,
-		)
-	}
-	return fmt.Errorf(
-		"created Rauthy client %q but could not record its ownership, so it was deleted again and "+
-			"will be recreated: %w",
-		id, cause,
-	)
-}
 
 // checkPolicies refuses management policies this resource cannot honour. A
 // client can only be made to match the spec by the PUT, so Update is always
@@ -504,7 +510,7 @@ func refusedError(id string, postErr error) error {
 func outcomeUnknownError(id string, postErr error) error {
 	return fmt.Errorf(
 		"create outcome unknown: the request failed but a client with id %q now exists; "+
-			"verify and delete it in Rauthy to retry: %w (%w)",
+			"the next reconcile will verify the pending creation proof: %w (%w)",
 		id, ErrAdoption, postErr,
 	)
 }

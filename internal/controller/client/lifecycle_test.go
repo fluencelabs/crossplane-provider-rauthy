@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
 	"github.com/fluencelabs/rauthy-go"
@@ -47,7 +50,7 @@ func TestCreate(t *testing.T) {
 		// failSecret makes every secret read fail.
 		failSecret bool
 		intercept  *interceptor.Funcs
-		// readerFails makes every uncached read fail.
+		// readerFails fails uncached reads after the two pre-create checks.
 		readerFails bool
 		// cancelOnPatch cancels the reconcile context inside the status
 		// patch and fails it, as when the deadline is what made it fail.
@@ -60,108 +63,91 @@ func TestCreate(t *testing.T) {
 		wantRemain  bool
 	}{
 		"PostOnly": {
-			reason:      "Create issues only the POST and records ownership in status.",
+			reason:      "Create records a pending proof before POST and confirms the issued secret afterward.",
 			cr:          newClient(),
-			wantCalls:   []string{"POST /clients", "POST /clients/app/secret"},
+			wantCalls:   []string{"POST /clients", "GET /clients/app", "POST /clients/app/secret", "GET /clients/app"},
 			wantOwnedID: testID,
 			wantRemain:  true,
 		},
 		"ExistingIDIsAdoption": {
-			reason:     "A POST refused (4xx) because the id exists is an adoption error and records nothing.",
-			cr:         newClient(),
-			server:     existing(true),
-			wantErrIs:  client.ErrAdoption,
-			wantErr:    errors.New("was not created by this resource"),
+			reason:    "A refused POST clears the pending reservation and never adopts an existing client.",
+			cr:        newClient(),
+			server:    existing(true),
+			wantErrIs: client.ErrAdoption,
+			wantErr: errors.New(
+				"was not created by this resource",
+			),
 			wantCalls:  []string{"POST /clients", "GET /clients/app"},
 			wantRemain: true,
 		},
 		"AmbiguousFailure": {
-			reason: "A 5xx POST after which the client exists is an unknown outcome, never ownership.",
-			cr:     newClient(),
-			server: existing(true),
-			// failPost answers 500 even though the client exists.
-			failPost:   true,
-			wantErrIs:  client.ErrAdoption,
-			wantErr:    errors.New("create outcome unknown"),
-			wantCalls:  []string{"POST /clients", "GET /clients/app"},
-			wantRemain: true,
+			reason:    "A failed POST keeps only a pending proof, which cannot match an unrelated client's name.",
+			cr:        newClient(),
+			server:    existing(true),
+			failPost:  true,
+			wantErrIs: client.ErrAdoption,
+			wantErr: errors.New(
+				"create outcome unknown",
+			),
+			wantCalls:   []string{"POST /clients", "GET /clients/app"},
+			wantRemain:  true,
+			wantOwnedID: testID,
 		},
 		"ServerError": {
-			reason:    "A failed POST after which no client exists is a plain create error.",
-			cr:        newClient(),
-			failPost:  true,
-			wantErr:   errors.New("cannot create Rauthy client"),
-			wantCalls: []string{"POST /clients", "GET /clients/app"},
+			reason: "A failed POST keeps the pending proof until Observe confirms absence and clears it.",
+			cr:     newClient(), failPost: true, wantErr: errors.New("cannot create Rauthy client"),
+			wantCalls: []string{"POST /clients", "GET /clients/app"}, wantOwnedID: testID,
 		},
-		"OwnershipNotRecordedRollsBack": {
-			reason:    "If ownership cannot be recorded, the new client is deleted again so a retry starts clean.",
-			cr:        newClient(),
-			intercept: &statusFails,
-			wantErr:   errors.New("was deleted again and will be recreated"),
-			wantCalls: []string{
-				"POST /clients",
-				"POST /clients/app/secret",
-				"GET /clients/app",
-				"POST /clients/app/secret",
-				"DELETE /clients/app",
-			},
+		"OwnershipNotRecordedPreventsPost": {
+			reason: "No POST occurs without a durable pending proof.",
+			cr:     newClient(), intercept: &statusFails, wantErr: errors.New("cannot record ownership"),
 		},
-		"OwnershipNotRecordedNoRollback": {
-			reason:    "If the rollback fails too, the error says what a human must delete.",
-			cr:        newClient(),
-			intercept: &statusFails,
-			failDel:   true,
-			wantErr:   errors.New(`delete client "app" in Rauthy to retry`),
-			wantCalls: []string{
-				"POST /clients",
-				"POST /clients/app/secret",
-				"GET /clients/app",
-				"POST /clients/app/secret",
-				"DELETE /clients/app",
-			},
-			wantRemain: true,
+		"OwnershipNotRecordedNeedsNoRollback": {
+			reason: "A failing DELETE cannot leak a client because no POST precedes the pending write.",
+			cr:     newClient(), intercept: &statusFails, failDel: true, wantErr: errors.New("cannot record ownership"),
 		},
 		"RecordAppliedDespiteError": {
-			reason:      "A patch that landed but answered with an error is confirmed by a re-read: created, no rollback.",
-			cr:          newClient(),
-			intercept:   &appliedThenFails,
-			wantCalls:   []string{"POST /clients", "POST /clients/app/secret"},
+			reason:    "A pending patch that landed despite an error is confirmed uncached before POST.",
+			cr:        newClient(),
+			intercept: &appliedThenFails,
+			wantCalls: []string{
+				"POST /clients",
+				"GET /clients/app",
+				"POST /clients/app/secret",
+				"GET /clients/app",
+			},
 			wantOwnedID: testID,
 			wantRemain:  true,
 		},
 		"RecordOutcomeUnknown": {
-			reason:      "If the re-read fails too, the client is neither deleted nor claimed.",
+			reason:      "An unknown pending-write outcome cannot cause an unrecorded POST.",
 			cr:          newClient(),
 			intercept:   &statusFails,
 			readerFails: true,
-			wantErr:     errors.New("outcome of recording its ownership is unknown"),
-			wantCalls:   []string{"POST /clients", "POST /clients/app/secret"},
-			wantRemain:  true,
+			wantErr:     errors.New("ownership write outcome is unknown"),
 		},
-		"RollbackSurvivesExpiredContext": {
-			reason:        "The rollback runs on a fresh context when the reconcile's has ended.",
-			cr:            newClient(),
-			cancelOnPatch: true,
-			wantErr:       errors.New("was deleted again and will be recreated"),
-			wantCalls: []string{
-				"POST /clients",
-				"POST /clients/app/secret",
-				"GET /clients/app",
-				"POST /clients/app/secret",
-				"DELETE /clients/app",
-			},
+		"ExpiredContextPreventsPost": {
+			reason: "Cancellation during the pending write prevents POST.",
+			cr:     newClient(), cancelOnPatch: true, wantErr: errors.New("cannot record ownership"),
 		},
-		"SecretUnreadableRemainsUnclaimed": {
-			reason:     "Without the new client's secret there is no binding to authorize a rollback DELETE.",
+		"SecretUnreadableKeepsPendingProof": {
+			reason:     "Secret read failures retain durable pending proof for recovery.",
 			cr:         newClient(),
 			failSecret: true,
 			wantErr:    errors.New("cannot read the secret of the new client"),
-			wantCalls:  []string{"POST /clients", "POST /clients/app/secret"},
-			wantRemain: true,
+			wantCalls: []string{
+				"POST /clients",
+				"GET /clients/app",
+				"POST /clients/app/secret",
+			},
+			wantOwnedID: testID,
+			wantRemain:  true,
 		},
 		"InvalidID": {
-			reason:  "An invalid id fails before any request.",
-			cr:      newClient(func(cr *v1alpha1.Client) { meta.SetExternalName(cr, "x") }),
+			reason: "An invalid id fails before any request.",
+			cr: newClient(
+				func(cr *v1alpha1.Client) { meta.SetExternalName(cr, "x") },
+			),
 			wantErr: errors.New("invalid client id"),
 		},
 	}
@@ -212,7 +198,7 @@ func TestCreateSendsOnlyCreateFields(t *testing.T) {
 	}
 
 	got := f.stored()
-	if got == nil || got.AccessTokenLifetime != 1800 || *got.Name != "My App" {
+	if got == nil || got.AccessTokenLifetime != 1800 || !matchesCreationName(cr, got.Name) {
 		t.Errorf("after the POST Rauthy should hold its defaults plus the create fields, got %+v", got)
 	}
 }
@@ -465,11 +451,11 @@ func createClients(
 	}
 	var reader kube.Reader = base
 	if readerFails {
-		initialRead := true
+		initialReads := 2
 		reader = interceptor.NewClient(base.(kube.WithWatch), interceptor.Funcs{
 			Get: func(ctx context.Context, c kube.WithWatch, key kube.ObjectKey, obj kube.Object, opts ...kube.GetOption) error {
-				if initialRead {
-					initialRead = false
+				if initialReads > 0 {
+					initialReads--
 					return c.Get(ctx, key, obj, opts...)
 				}
 				return errors.New("API server unreachable")
@@ -512,7 +498,7 @@ func TestCreateRecordsBinding(t *testing.T) {
 		if _, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Create(ctx, cr); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
-		if diff := cmp.Diff([]string{"POST /clients"}, f.callLog()); diff != "" {
+		if diff := cmp.Diff([]string{"POST /clients", "GET /clients/app"}, f.callLog()); diff != "" {
 			t.Errorf("a public client's create reads no secret: -want, +got:\n%s", diff)
 		}
 		if got := inMemoryOwnership(cr); got != testID || cr.Status.Ownership.SecretFingerprint != "" {
@@ -583,5 +569,24 @@ func TestFailedDeleteRetainsOwnership(t *testing.T) {
 	}
 	if f.stored() != nil || storedOwnership(t, k, cr) != "" {
 		t.Fatal("retry failed to delete client and clear ownership")
+	}
+}
+
+func TestCreateDoesNotReplaceExistingRecord(t *testing.T) {
+	f := newFakeRauthy(t)
+	f.put(existing(true))
+	cr := newClient(owned)
+	k := newKube(t, f, cr)
+	want := cr.Status.Ownership.DeepCopy()
+	want.CreatedAt = metav1.NewTime(want.CreatedAt.Truncate(time.Second))
+	_, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Create(context.Background(), cr)
+	if err == nil {
+		t.Fatal("Create replaced an existing ownership record")
+	}
+	if diff := cmp.Diff(want, cr.Status.Ownership); diff != "" {
+		t.Errorf("existing ownership changed: %s", diff)
+	}
+	if len(f.callLog()) != 0 {
+		t.Errorf("unexpected Rauthy calls: %v", f.callLog())
 	}
 }

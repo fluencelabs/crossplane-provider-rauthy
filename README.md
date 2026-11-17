@@ -145,16 +145,14 @@ this resource's client with that id exists in Rauthy.**
 | S3    | id     | none          | Transient: the record is cleared, confirmed, before anything else. |
 | S4    | id on another `Client` too | any | Refused with the message above: never created, published, updated or deleted. Deleting the `Client` finalizes it without touching Rauthy. |
 
-- **Create** (S0): the POST, then the secret is read and the record (id and
-  fingerprint) is written in one status patch. If the secret cannot be read,
-  the client is left unclaimed because rollback ownership cannot be proved.
-  If writing the record fails, the provider
-  re-reads the `Client` without the cache: if the record landed anyway, the
-  client is kept (S2); if it did not, the provider checks the client and its
-  secret fingerprint again before deleting it (back to S0); if even the re-read fails, the client is neither deleted nor claimed,
-  and the next reconcile decides from a fresh read (S2 or S1). Re-reads and
-  the rollback run on their own bounded context, so an expired reconcile
-  deadline does not stop them.
+- **Create** (S0): before POST, persist a pending ownership record containing
+  the hash of a random temporary Rauthy client name. The POST uses that name.
+  Confirm the name, read the secret, then confirm the name again before
+  recording the final secret fingerprint. A transient read or status failure
+  leaves the pending proof for the next reconcile, including after restart.
+  A different name is refused without publishing, updating or deleting the
+  client. The first owned Update restores the requested name, including an
+  unset name. A CRD that prunes the pending proof prevents POST entirely.
 - **Delete** (S2): the DELETE, then the record is cleared at once.
 - **A client that disappears** (S2 to S3, by Delete or out of band): the next
   observation clears the record and only then lets the resource create again
@@ -232,18 +230,16 @@ The create call itself knows how it ended, and its error says so once:
   resource; choose another id`.
 - **The create request fails ambiguously** (a timeout, a transport error or a
   5xx answer) and a client with that id exists afterwards: `create outcome
-  unknown: the request failed but a client with id "<id>" now exists; verify
-  and delete it in Rauthy to retry`.
-- **Recording ownership fails**: see Create above. If the rollback DELETE
-  fails, the error names the client to delete in Rauthy by hand.
+  unknown: the request failed but a client with id "<id>" now exists; the next
+  reconcile will verify the pending creation proof`.
+- **Recording ownership fails**: before POST, no client is created. After
+  POST, the pending proof is retained and finalization retries on reconcile.
 - **The installed `Client` CRD is older** and silently drops
-  `status.ownership`: the new client is deleted again and the provider stops
-  creating clients, reporting that the CRD lacks the field, until it is
-  restarted with current CRDs. This avoids creating and deleting a client on
-  every reconcile.
+  `status.ownership` or its pending proof: no client is created. The provider
+  stops creating clients until it is restarted with current CRDs.
 
-From the next reconcile on, every one of these shows the single message from
-the no-adoption rule above.
+On subsequent reconciles, a matching pending creation resumes. An unrelated
+client is refused without mutation.
 
 ## Install
 
