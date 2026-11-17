@@ -69,8 +69,12 @@ func differences(p *v1alpha1.ClientParameters, obs *rauthy.ClientResponse) []str
 	check("name", stringEqual(p.Name, obs.Name))
 	check("confidential", p.Confidential == obs.Confidential)
 	check("enabled", valueEqual(p.Enabled, obs.Enabled))
-	check("redirectUris", setEqual(p.RedirectURIs, obs.RedirectURIs))
-	check("postLogoutRedirectUris", listEqual(p.PostLogoutRedirectURIs, obs.PostLogoutRedirectURIs))
+	check("redirectUris", uriListsEqual(p.RedirectURIs, obs.RedirectURIs))
+	check(
+		"postLogoutRedirectUris",
+		p.PostLogoutRedirectURIs == nil || nonemptyListEqual(
+			strings.Split(strings.Join(p.PostLogoutRedirectURIs, ","), ","), obs.PostLogoutRedirectURIs),
+	)
 	check("allowedOrigins", listEqual(p.AllowedOrigins, obs.AllowedOrigins))
 	check("flowsEnabled", listEqual(p.FlowsEnabled, obs.FlowsEnabled))
 	check("accessTokenAlg", valueEqual(p.AccessTokenAlg, obs.AccessTokenAlg))
@@ -82,7 +86,7 @@ func differences(p *v1alpha1.ClientParameters, obs *rauthy.ClientResponse) []str
 	check("challenges", listEqual(p.Challenges, obs.Challenges))
 	check("forceMfa", valueEqual(p.ForceMFA, obs.ForceMFA))
 	check("clientUri", stringEqual(p.ClientURI, obs.ClientURI))
-	check("contacts", listEqual(p.Contacts, obs.Contacts))
+	check("contacts", nonemptyListEqual(p.Contacts, obs.Contacts))
 	check("backchannelLogoutUri", stringEqual(p.BackchannelLogoutURI, obs.BackchannelLogoutURI))
 	check("restrictGroupPrefix", stringEqual(p.RestrictGroupPrefix, obs.RestrictGroupPrefix))
 
@@ -191,9 +195,20 @@ func listEqual(desired, observed []string) bool {
 }
 
 // scopesEqual compares a scope list: an unset or empty desired list matches
-// anything, as orScopes keeps what Rauthy holds for both.
+// anything, as orScopes keeps what Rauthy holds for both. Rauthy adds openid
+// to explicitly managed non-empty scope lists.
 func scopesEqual(desired, observed []string) bool {
-	return len(desired) == 0 || setEqual(desired, observed)
+	if len(desired) == 0 {
+		return true
+	}
+	// Rauthy stores the list as one CSV and splits it on read, so a scope
+	// name with a comma comes back as two. sanitize_scopes checks that CSV for
+	// the openid substring, including inside custom scope names.
+	csv := strings.Join(desired, ",")
+	if !strings.Contains(csv, "openid") {
+		csv = "openid," + csv
+	}
+	return setEqual(strings.Split(csv, ","), observed)
 }
 
 // setEqual compares two lists as sets: Rauthy stores these fields without a
@@ -206,4 +221,21 @@ func normalise(s []string) []string {
 	out := slices.Clone(s)
 	slices.Sort(out)
 	return slices.Compact(out)
+}
+
+// uriListsEqual accounts for Rauthy's comma-separated URI storage.
+func uriListsEqual(desired, observed []string) bool {
+	if len(desired) == 0 || len(observed) == 0 {
+		return len(desired) == len(observed)
+	}
+	return setEqual(strings.Split(strings.Join(desired, ","), ","), strings.Split(strings.Join(observed, ","), ","))
+}
+
+// nonemptyListEqual drops empty entries, as Rauthy's contact and post-logout URI getters do.
+func nonemptyListEqual(desired, observed []string) bool {
+	if desired == nil {
+		return true
+	}
+	nonempty := slices.DeleteFunc(slices.Clone(desired), func(s string) bool { return s == "" })
+	return setEqual(nonempty, observed)
 }

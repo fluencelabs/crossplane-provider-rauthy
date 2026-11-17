@@ -350,6 +350,9 @@ func TestObserveFillsAtProvider(t *testing.T) {
 	}
 
 	got := cr.Status.AtProvider
+	if diff := cmp.Diff(existing(true).RedirectURIs, got.RedirectURIs); diff != "" {
+		t.Errorf("observed redirect URIs (-want +got):\n%s", diff)
+	}
 	if got.ID != testID || got.AccessTokenAlg != "EdDSA" || got.AccessTokenLifetime != 1800 || !got.Confidential {
 		t.Errorf("status.atProvider does not carry the observed client: %+v", got)
 	}
@@ -379,7 +382,7 @@ func TestStaleCachedOwnershipIsNotTrusted(t *testing.T) {
 	foreign := existing(true)
 	f.put(foreign)
 	truth := newClient()
-	k := newKube(t, truth)
+	k := newKube(t, f, truth)
 	stale := truth.DeepCopy()
 	owned(stale)
 
@@ -453,7 +456,7 @@ func TestObserveClearsMarkerOfMissingClient(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			f := newFakeRauthy(t)
-			base := newKube(t, tc.truth)
+			base := newKube(t, f, tc.truth)
 			k := base
 			if tc.intercept != nil {
 				k = interceptor.NewClient(base.(kube.WithWatch), *tc.intercept)
@@ -481,7 +484,7 @@ func TestDeleteClearsMarker(t *testing.T) {
 	f := newFakeRauthy(t)
 	f.put(existing(true))
 	cr := newClient(owned, deleting)
-	k := newKube(t, cr)
+	k := newKube(t, f, cr)
 
 	if _, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Delete(context.Background(), cr); err != nil {
 		t.Fatalf("Delete: %v", err)
@@ -511,7 +514,7 @@ func TestRecordForAnotherIDIsKept(t *testing.T) {
 			if del {
 				deleting(truth)
 			}
-			k := newKube(t, truth)
+			k := newKube(t, f, truth)
 			cached := truth.DeepCopy()
 			cached.Status.Ownership = nil
 

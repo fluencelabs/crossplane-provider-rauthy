@@ -79,17 +79,12 @@ record was made for.
 - **Rotating a client's secret in the Rauthy UI orphans it from the provider,
   by design**: the provider can no longer tell it from a client somebody else
   created with the same id, so it stops managing it (state S2' below).
-- **A public client has no secret.** Its binding is the id alone, so a public
+- **A public client has no secret.** Its binding is the backend URL and id, so a public
   client deleted and recreated outside Kubernetes with the same id is still
   taken for the resource's own.
-- **A record must be the only one for its id.** Rauthy client ids are global,
+- **A record must be the only one for its id in the same Rauthy instance.** Client ids are global within an instance,
   while `Client` objects are namespaced. If another `Client` (another UID)
-  records the same id, this one is refused. Every observation looks such a
-  record up in the provider's cache (an index on `status.ownership.clientID`),
-  which can miss a record written within the cache's lag. The create and the
-  delete do not rely on that: right before the create call and right before
-  the delete call the provider lists every `Client` in the cluster straight
-  from the API server and refuses on a match. This holds for confidential clients too: two
+  records the same id, this one is refused. This holds for confidential clients too: two
   records of one id can only come from a record that outlived its client or
   from a forged one, and the provider cannot tell which of the two is right.
   A record left behind by a client deleted out of band therefore blocks other
@@ -114,6 +109,14 @@ record was made for.
 - **`confidential` is immutable** (enforced by the CRD and by the
   controller): switching would change the binding. Delete and recreate the
   `Client` to switch.
+
+Ownership records include the Rauthy API root (`backendURL`). A changed
+`providerConfigRef` or ProviderConfig URL cannot transfer ownership to another
+Rauthy instance, even if it contains a public client with the same id. Restore
+the original URL to resume reconciliation and deletion. Independent Rauthy
+instances can each manage the same client id. A record written by an earlier
+release has no `backendURL`; the provider binds it to the current
+ProviderConfig URL on its first reconcile, so upgrade before changing the URL.
 
 Before it acts as the owner (reports the client as existing, reads or
 publishes its secret, updates or deletes it), the provider re-reads the

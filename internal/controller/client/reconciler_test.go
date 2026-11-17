@@ -129,6 +129,7 @@ func (c *staleCache) Get(ctx context.Context, key kube.ObjectKey, obj kube.Objec
 
 func newHarness(t *testing.T, f *fakeRauthy, cr *v1alpha1.Client, intercept ...interceptor.Funcs) *harness {
 	t.Helper()
+	bindBackend(f.srv.URL+"/auth/v1", cr)
 	s := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(s); err != nil {
 		t.Fatal(err)

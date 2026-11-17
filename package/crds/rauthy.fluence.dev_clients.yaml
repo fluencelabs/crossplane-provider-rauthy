@@ -93,6 +93,7 @@ spec:
                     - RS384
                     - RS512
                     - EdDSA
+                    - Ed25519
                     type: string
                   accessTokenLifetime:
                     description: AccessTokenLifetime is the lifetime of an access
@@ -106,7 +107,7 @@ spec:
                       AllowedOrigins are additional CORS origins, as scheme://host[:port]
                       without a path.
                     items:
-                      pattern: ^(http|https)://[a-z0-9.:-]+$
+                      pattern: ^[a-zA-Z][a-zA-Z0-9+.\-]*://[a-z0-9.:-]+$
                       type: string
                     type: array
                     x-kubernetes-list-type: set
@@ -151,7 +152,7 @@ spec:
                   contacts:
                     description: Contacts of the application's maintainers.
                     items:
-                      pattern: ^[a-zA-Z0-9+.@/-]{0,48}$
+                      pattern: ^[a-zA-Z0-9+.@/:-]{0,48}$
                       type: string
                     type: array
                     x-kubernetes-list-type: set
@@ -175,6 +176,7 @@ spec:
                       - authorization_code
                       - client_credentials
                       - urn:ietf:params:oauth:grant-type:device_code
+                      - urn:ietf:params:oauth:grant-type:token-exchange
                       - password
                       - refresh_token
                       type: string
@@ -192,11 +194,12 @@ spec:
                     - RS384
                     - RS512
                     - EdDSA
+                    - Ed25519
                     type: string
                   name:
                     description: Name is the human-readable name shown on the login
                       page.
-                    pattern: ^$|^[a-zA-Z0-9À-ɏ\-\s\x{3041}-\x{3096}\x{30A0}-\x{30FF}\x{3400}-\x{4DB5}\x{4E00}-\x{9FCB}\x{F900}-\x{FA6A}\x{2E80}-\x{2FD5}\x{FF66}-\x{FF9F}\x{FFA1}-\x{FFDC}\x{31F0}-\x{31FF}]{2,128}$
+                    pattern: ^$|^(?:[a-zA-Z0-9À-ɏ\x{3041}-\x{3096}\x{30A0}-\x{30FF}\x{3400}-\x{4DB5}\x{4E00}-\x{9FCB}\x{F900}-\x{FA6A}\x{2E80}-\x{2FD5}\x{FF66}-\x{FF9F}\x{FFA1}-\x{FFDC}\x{31F0}-\x{31FF}\x{0009}-\x{000D}\x{0085}\p{Zs}\x{2028}\x{2029}()\-]{2,128}|[\p{L}\p{M}\p{N}\p{Zs}()._-]{2,128})$
                     type: string
                   postLogoutRedirectUris:
                     description: PostLogoutRedirectURIs are the allowed redirect URIs
@@ -219,7 +222,7 @@ spec:
                     description: |-
                       RestrictGroupPrefix restricts logins to users in groups starting with
                       this prefix.
-                    pattern: ^$|^[a-zA-Z0-9-_/,:*\s]{2,64}$
+                    pattern: ^$|^[a-zA-Z0-9-_/,:*\x{0009}-\x{000D}\x{0085}\p{Zs}\x{2028}\x{2029}]{2,64}$
                     type: string
                   scopes:
                     description: Scopes the client may request.
@@ -429,6 +432,11 @@ spec:
                 description: Ownership is set once this resource has created its Rauthy
                   client.
                 properties:
+                  backendURL:
+                    description: |-
+                      BackendURL is the API root of the Rauthy instance that created the client.
+                      Changing the provider config must never transfer ownership to another instance.
+                    type: string
                   clientID:
                     description: ClientID is the id of the Rauthy client this resource
                       created.
@@ -445,6 +453,7 @@ spec:
                       has no secret. The secret itself is never stored.
                     type: string
                 required:
+                - backendURL
                 - clientID
                 - createdAt
                 type: object

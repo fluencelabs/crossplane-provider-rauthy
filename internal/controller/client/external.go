@@ -31,9 +31,12 @@ const (
 var ErrAdoption = errors.New("adoption is not supported")
 
 var (
-	errEmptyID               = errors.New("the client id (the external name) is empty")
-	errInvalidID             = errors.New("invalid client id")
-	errNotOwned              = errors.New("refusing to modify a Rauthy client this resource did not create")
+	errEmptyID        = errors.New("the client id (the external name) is empty")
+	errInvalidID      = errors.New("invalid client id")
+	errNotOwned       = errors.New("refusing to modify a Rauthy client this resource did not create")
+	errBackendChanged = errors.New(
+		"the Rauthy backend cannot change after creation; restore the original ProviderConfig URL",
+	)
 	errIDChanged             = errors.New("the client id is immutable")
 	errNoSecret              = errors.New("no secret was reported for the new confidential client")
 	errConfidentialImmutable = errors.New(
@@ -59,6 +62,7 @@ var (
 
 // api is the part of the Rauthy client the controller uses.
 type api interface {
+	BaseURL() string
 	CreateClient(ctx context.Context, req rauthy.NewClientRequest) (*rauthy.ClientResponse, error)
 	GetClient(ctx context.Context, id string) (*rauthy.ClientResponse, error)
 	UpdateClient(ctx context.Context, id string, req rauthy.UpdateClientRequest) (*rauthy.ClientResponse, error)
@@ -83,8 +87,9 @@ type external struct {
 	log logging.Logger
 	// cache looks Clients up by ClientIDIndex; nil sends those lookups to
 	// reader.
-	cache  kube.Reader
-	issuer string
+	cache      kube.Reader
+	issuer     string
+	backendURL string
 	// crd is set, for the life of the process, once the installed CRD is
 	// found to prune status.ownership.
 	crd *atomic.Bool
@@ -114,7 +119,7 @@ func newExternal(
 	crd *atomic.Bool,
 ) *external {
 	return &external{
-		api: c, status: status, reader: reader, cache: cache, issuer: issuer, crd: crd,
+		api: c, status: status, reader: reader, cache: cache, issuer: issuer, backendURL: c.BaseURL(), crd: crd,
 		log: logging.NewNopLogger(),
 	}
 }
@@ -135,10 +140,10 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Client) (managed.Ex
 // reading its secret, and the Update and Delete that follow) needs ownership
 // confirmed by an uncached read.
 func (e *external) observe(ctx context.Context, cr *v1alpha1.Client) (managed.ExternalObservation, error) {
-	id := meta.GetExternalName(cr)
-	if err := checkRecordID(cr, id); err != nil {
+	if err := e.checkBackend(ctx, cr); err != nil {
 		return managed.ExternalObservation{}, err
 	}
+	id := meta.GetExternalName(cr)
 	if release, err := e.releasable(ctx, cr); err != nil || release {
 		return managed.ExternalObservation{ResourceExists: false}, err
 	}
@@ -277,6 +282,9 @@ func (e *external) observeOwned(
 // Create is only called after Observe found no client and confirmed that the
 // API server holds no marker (S0).
 func (e *external) Create(ctx context.Context, cr *v1alpha1.Client) (managed.ExternalCreation, error) {
+	if err := e.checkBackend(ctx, cr); err != nil {
+		return managed.ExternalCreation{}, err
+	}
 	id := meta.GetExternalName(cr)
 	if err := validateClientID(id); err != nil {
 		return managed.ExternalCreation{}, err
