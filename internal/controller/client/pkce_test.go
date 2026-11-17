@@ -2,9 +2,12 @@ package client_test
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
@@ -293,5 +296,50 @@ func TestReconcilerRefusesCommaRedirectURI(t *testing.T) {
 				t.Errorf("Rauthy was called before the refusal: %v", calls)
 			}
 		})
+	}
+}
+
+func TestReconcilerOwnedCommaRedirectClearsReady(t *testing.T) {
+	t.Parallel()
+	// A valid URI comes first: every entry is checked, not only the first.
+	uris := []string{"https://app.example.com/valid", "https://app.example.com/a,b"}
+	for field, mod := range map[string]func(*v1alpha1.Client){
+		"redirect":    func(cr *v1alpha1.Client) { cr.Spec.ForProvider.RedirectURIs = uris },
+		"post-logout": func(cr *v1alpha1.Client) { cr.Spec.ForProvider.PostLogoutRedirectURIs = uris },
+	} {
+		for _, confidential := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/confidential=%v", field, confidential), func(t *testing.T) {
+				t.Parallel()
+				checkOwnedCommaRefusal(t, confidential, mod)
+			})
+		}
+	}
+}
+
+func checkOwnedCommaRefusal(t *testing.T, confidential bool, mod func(*v1alpha1.Client)) {
+	t.Helper()
+	f := newFakeRauthy(t)
+	f.put(existing(confidential))
+	kind := func(cr *v1alpha1.Client) { cr.Spec.ForProvider.Confidential = confidential }
+	h := newHarness(t, f, newClient(kind, owned, finalized))
+	got := h.reconcile(t, 3)
+	if conditionStatus(got, xpv2.TypeReady) != "True" || conditionStatus(got, xpv2.TypeSynced) != "True" {
+		t.Fatalf("setup: conditions %+v, want Ready and Synced", got.Status.Conditions)
+	}
+	before, calls := f.stored(), len(f.callLog())
+	mod(got)
+	if err := h.kube.Update(context.Background(), got); err != nil {
+		t.Fatal(err)
+	}
+	got = h.reconcile(t, 3)
+	if conditionStatus(got, xpv2.TypeReady) != "False" || conditionStatus(got, xpv2.TypeSynced) != "False" ||
+		!strings.Contains(got.GetCondition(xpv2.TypeSynced).Message, "must not contain a comma") {
+		t.Errorf("conditions %+v, want not Ready and the comma refusal", got.Status.Conditions)
+	}
+	if after := f.callLog()[calls:]; len(after) != 0 {
+		t.Errorf("Rauthy was called after the invalid update: %v", after)
+	}
+	if diff := cmp.Diff(before, f.stored()); diff != "" {
+		t.Errorf("stored client changed (-before +after):\n%s", diff)
 	}
 }
