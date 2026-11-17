@@ -12,6 +12,17 @@ talks to Rauthy's admin API through
 v2: managed resources are namespaced, so a composite resource can compose a
 `Client` straight into the application's namespace.
 
+## Known limits
+
+- Rauthy has no conditional writes. A client can change during the single-request
+  window between the provider's ownership check and its update or delete.
+- For public clients recreated outside Kubernetes, see the policy under
+  [What counts as ownership](#what-counts-as-ownership).
+- A client update can persist before SCIM synchronization fails with HTTP 500.
+  The resource can become `Ready` on the next observation if its managed fields
+  match. `Ready` does not confirm SCIM completion. SCIM recovery depends on
+  Rauthy's own subsequent synchronization, which the provider does not trigger.
+
 ## Resources
 
 | Kind                    | Scope      | Purpose                                                   |
