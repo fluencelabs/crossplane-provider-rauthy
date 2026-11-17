@@ -289,8 +289,8 @@ func TestReconcilerRefusesCommaRedirectURI(t *testing.T) {
 				!strings.Contains(got.GetCondition(xpv2.TypeSynced).Message, "must not contain a comma") {
 				t.Fatalf("conditions %+v; want the comma refusal", got.Status.Conditions)
 			}
-			if f.stored() != nil {
-				t.Error("a Rauthy client was created")
+			if calls := f.callLog(); len(calls) != 0 {
+				t.Errorf("Rauthy was called before the refusal: %v", calls)
 			}
 		})
 	}
