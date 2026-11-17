@@ -44,12 +44,16 @@ type ClientParameters struct {
 	Enabled *bool `json:"enabled,omitempty"`
 
 	// RedirectURIs are the allowed redirect URIs. Order does not matter.
+	// Commas are forbidden because Rauthy stores this list comma-separated.
+	// +kubebuilder:validation:XValidation:rule="self.all(uri, !uri.contains(','))",message="redirect URIs must not contain commas"
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9,.:/_\-&?=~#!$'()*+%@]+$`
 	// +listType=set
 	RedirectURIs []string `json:"redirectUris"`
 
 	// PostLogoutRedirectURIs are the allowed redirect URIs after a logout.
+	// Commas are forbidden because Rauthy stores this list comma-separated.
+	// +kubebuilder:validation:XValidation:rule="self.all(uri, !uri.contains(','))",message="post-logout redirect URIs must not contain commas"
 	// +optional
 	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9,.:/_\-&?=~#!$'()*+%@]+$`
 	// +listType=set

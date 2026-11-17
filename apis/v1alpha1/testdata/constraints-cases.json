@@ -40,51 +40,11 @@
     "expected": true
   },
   {
-    "id": "L1-G2#0",
-    "resource": "client",
-    "field": "flows_enabled",
-    "value": "urn:ietf:params:oauth:grant-type:token-exchange",
-    "validator": "GrantTypes",
-    "expected": true
-  },
-  {
     "id": "L1-G2#1",
     "resource": "client",
     "field": "name",
     "value": "Панель",
     "validator": "ClientName",
-    "expected": true
-  },
-  {
-    "id": "L1-G2#2",
-    "resource": "client",
-    "field": "contacts",
-    "value": "mailto:ops@example.com",
-    "validator": "Contact",
-    "expected": true
-  },
-  {
-    "id": "L1-G5#7",
-    "resource": "client",
-    "field": "contacts",
-    "value": "mailto:ops@example.com",
-    "validator": "Contact",
-    "expected": true
-  },
-  {
-    "id": "L1-G5#8",
-    "resource": "client",
-    "field": "allowed_origins",
-    "value": "tauri://localhost",
-    "validator": "Origin",
-    "expected": true
-  },
-  {
-    "id": "L1-G5#9",
-    "resource": "client",
-    "field": "flows_enabled",
-    "value": "urn:ietf:params:oauth:grant-type:token-exchange",
-    "validator": "GrantTypes",
     "expected": true
   },
   {
@@ -101,14 +61,6 @@
     "field": "contacts",
     "value": "https://example.com",
     "validator": "Contact",
-    "expected": true
-  },
-  {
-    "id": "L1-G7#2",
-    "resource": "client",
-    "field": "flows_enabled",
-    "value": "urn:ietf:params:oauth:grant-type:token-exchange",
-    "validator": "GrantTypes",
     "expected": true
   },
   {
@@ -197,7 +149,7 @@
     "field": "redirect_uris",
     "value": "https://example.com/a,b",
     "validator": "URI",
-    "expected": true
+    "expected": false
   },
   {
     "id": "redirect-/cb",

@@ -44,9 +44,16 @@ func TestNormalizedScopesAndRedirects(t *testing.T) {
 		{name: "scopes add openid", p: v1alpha1.ClientParameters{Scopes: []string{"email"}, DefaultScopes: []string{"profile"}}, obs: rauthy.ClientResponse{Scopes: []string{"openid", "email"}, DefaultScopes: []string{"profile", "openid"}}},
 		{name: "custom openid scope", p: v1alpha1.ClientParameters{Scopes: []string{"myopenid"}}, obs: rauthy.ClientResponse{Scopes: []string{"myopenid"}}},
 		{name: "real scope drift", p: v1alpha1.ClientParameters{Scopes: []string{"email"}}, obs: rauthy.ClientResponse{Scopes: []string{"openid", "profile"}}, want: []string{"scopes"}},
-		{name: "empty post logout entries", p: v1alpha1.ClientParameters{PostLogoutRedirectURIs: []string{"https://app.example/c,"}}, obs: rauthy.ClientResponse{PostLogoutRedirectURIs: []string{"https://app.example/c"}}},
+		{name: "empty post logout entries", p: v1alpha1.ClientParameters{PostLogoutRedirectURIs: []string{"https://app.example/c", ""}}, obs: rauthy.ClientResponse{PostLogoutRedirectURIs: []string{"https://app.example/c"}}},
 		{name: "empty contacts", p: v1alpha1.ClientParameters{Contacts: []string{""}}, obs: rauthy.ClientResponse{}},
-		{name: "URI comma storage", p: v1alpha1.ClientParameters{RedirectURIs: []string{"https://app.example/a,b"}, PostLogoutRedirectURIs: []string{"https://app.example/c,d"}}, obs: rauthy.ClientResponse{RedirectURIs: []string{"https://app.example/a", "b"}, PostLogoutRedirectURIs: []string{"https://app.example/c", "d"}}},
+		{name: "URI comma storage", p: v1alpha1.ClientParameters{RedirectURIs: []string{"https://app.example/a,b"}, PostLogoutRedirectURIs: []string{"https://app.example/c,d"}}, obs: rauthy.ClientResponse{RedirectURIs: []string{"https://app.example/a", "b"}, PostLogoutRedirectURIs: []string{"https://app.example/c", "d"}}, want: []string{"redirectUris", "postLogoutRedirectUris"}},
+		{name: "contacts drift", p: v1alpha1.ClientParameters{Contacts: []string{"ops@example.com"}}, obs: rauthy.ClientResponse{Contacts: []string{"other@example.com"}}, want: []string{"contacts"}},
+		{name: "post logout drift", p: v1alpha1.ClientParameters{PostLogoutRedirectURIs: []string{"https://app.example/c"}}, obs: rauthy.ClientResponse{PostLogoutRedirectURIs: []string{"https://other.example/c"}}, want: []string{"postLogoutRedirectUris"}},
+		{name: "default scopes drift", p: v1alpha1.ClientParameters{DefaultScopes: []string{"email"}}, obs: rauthy.ClientResponse{DefaultScopes: []string{"openid", "profile"}}, want: []string{"defaultScopes"}},
+		{name: "clear contacts", p: v1alpha1.ClientParameters{Contacts: []string{}}, obs: rauthy.ClientResponse{Contacts: []string{"ops@example.com"}}, want: []string{"contacts"}},
+		{name: "clear post logout", p: v1alpha1.ClientParameters{PostLogoutRedirectURIs: []string{}}, obs: rauthy.ClientResponse{PostLogoutRedirectURIs: []string{"https://app.example/c"}}, want: []string{"postLogoutRedirectUris"}},
+		{name: "unset lists", obs: rauthy.ClientResponse{Contacts: []string{"ops@example.com"}, PostLogoutRedirectURIs: []string{"https://app.example/c"}, DefaultScopes: []string{"openid", "profile"}}},
+		{name: "list order", p: v1alpha1.ClientParameters{RedirectURIs: []string{"https://app.example/a", "https://app.example/b"}, Contacts: []string{"a@example.com", "b@example.com"}, PostLogoutRedirectURIs: []string{"https://app.example/a", "https://app.example/b"}}, obs: rauthy.ClientResponse{RedirectURIs: []string{"https://app.example/b", "https://app.example/a"}, Contacts: []string{"b@example.com", "a@example.com"}, PostLogoutRedirectURIs: []string{"https://app.example/b", "https://app.example/a"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := differences(&tc.p, &tc.obs); !slices.Equal(got, tc.want) {
