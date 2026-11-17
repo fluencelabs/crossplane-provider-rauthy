@@ -71,7 +71,9 @@ import (
 // (refused until someone deletes C); after M leaves S2; between a DELETE and
 // clearing M leaves S3, which the next Observe repairs. For public clients the
 // S2 -> S2' transition cannot be detected: a recreated public client with the
-// same id looks like S2.
+// same id looks like S2. For a confidential client it is detected up to one
+// request: Update and Delete confirm the secret right before they write, and
+// Rauthy offers no conditional write to close the gap between the two.
 
 // detachedTimeout bounds the repair calls (re-reads, clears and rollbacks)
 // that run on a context detached from the reconcile, whose deadline is the
@@ -122,15 +124,13 @@ const (
 
 // verifyOwner decides, from an uncached read of the Client and the binding,
 // whether this resource owns the Rauthy client got. For a confidential client
-// it returns the secret it read, so the caller need not fetch it again. The
-// answer is remembered for the rest of this reconcile.
+// it returns the secret it read, so the caller need not fetch it again.
 func (e *external) verifyOwner(
 	ctx context.Context,
 	cr *v1alpha1.Client,
 	id string,
 	got *rauthy.ClientResponse,
 ) (owner, *rauthy.Secret, error) {
-	e.confirmed = ""
 	fresh, err := e.readFresh(ctx, cr)
 	if err != nil {
 		return notOwned, nil, fmt.Errorf("cannot confirm ownership of client %q: %w", id, err)
@@ -157,7 +157,6 @@ func (e *external) verifyOwner(
 		if rec.SecretFingerprint != "" {
 			return otherClient, nil, nil
 		}
-		e.confirmed = id
 		return ownedClient, nil, nil
 	}
 	if rec.SecretFingerprint == "" {
@@ -174,7 +173,6 @@ func (e *external) verifyOwner(
 	if subtle.ConstantTimeCompare([]byte(current), []byte(rec.SecretFingerprint)) != 1 {
 		return otherClient, nil, nil
 	}
-	e.confirmed = id
 	return ownedClient, s.Secret, nil
 }
 
@@ -203,8 +201,8 @@ func IndexClientID(o kube.Object) []string {
 // records.
 //
 // This is the authoritative check: every Client is listed from the API
-// server, bypassing the cache. Create runs it right before the POST and
-// Delete right before the DELETE.
+// server, bypassing the cache. Create runs it right before the POST; Delete
+// runs it before confirming the client itself and then sending the DELETE.
 func (e *external) recordedElsewhere(ctx context.Context, cr *v1alpha1.Client, id string) (bool, error) {
 	ctx, cancel := detached(ctx)
 	defer cancel()
@@ -221,8 +219,8 @@ func (e *external) recordedElsewhere(ctx context.Context, cr *v1alpha1.Client, i
 // a record written within the cache's lag, and everything Observe decides as
 // the owner rests on it: publishing the connection details (a confidential
 // client's secret included), reporting the client as existing and Ready, and
-// the Update that follows. Create and Delete do not: they repeat the check
-// uncached right before the POST and the DELETE.
+// the Update that follows. Create and Delete do not: they run the uncached
+// check before the POST and the DELETE.
 func (e *external) recordedElsewhereCached(ctx context.Context, cr *v1alpha1.Client, id string) (bool, error) {
 	if e.cache == nil {
 		return e.recordedElsewhere(ctx, cr, id)
@@ -263,22 +261,25 @@ func otherRecord(items []v1alpha1.Client, cr *v1alpha1.Client, id, backend strin
 	return nil
 }
 
-// ensureOwned is verifyOwner for the acting paths, reusing a confirmation
-// already made in this reconcile. A client that no longer exists is not
-// owned: there is nothing to act on.
-func (e *external) ensureOwned(ctx context.Context, cr *v1alpha1.Client, id string) (owner, error) {
+// ensureOwned reads the client and confirms, uncached, that this resource
+// owns it, right before a write. It returns the client it read, so the write
+// is built from the state it confirmed: a confirmation cached from Observe
+// would let a client deleted and recreated with a new secret in between be
+// updated or deleted by a resource that no longer owns it.
+func (e *external) ensureOwned(
+	ctx context.Context,
+	cr *v1alpha1.Client,
+	id string,
+) (owner, *rauthy.ClientResponse, error) {
 	if err := e.checkBackend(ctx, cr); err != nil {
-		return notOwned, err
-	}
-	if id != "" && e.confirmed == id {
-		return ownedClient, nil
+		return notOwned, nil, err
 	}
 	got, err := e.lookup(ctx, id)
 	if err != nil || got == nil {
-		return notOwned, err
+		return notOwned, nil, err
 	}
 	o, _, err := e.verifyOwner(ctx, cr, id, got)
-	return o, err
+	return o, got, err
 }
 
 // patchOwnership writes the marker (nil clears it) and reports what the API
@@ -332,7 +333,6 @@ func sameRecord(stored, want *v1alpha1.ClientOwnership) bool {
 // clearOwnership removes the marker and returns nil only once the API server
 // is known not to hold one.
 func (e *external) clearOwnership(ctx context.Context, cr *v1alpha1.Client) error {
-	e.confirmed = ""
 	stored, known, err := e.patchOwnership(ctx, cr, nil)
 	switch {
 	case !known:

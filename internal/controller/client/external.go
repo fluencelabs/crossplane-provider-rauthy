@@ -100,9 +100,6 @@ type external struct {
 	// crd is set, for the life of the process, once the installed CRD is
 	// found to prune status.ownership.
 	crd *atomic.Bool
-	// confirmed is the client id whose ownership an uncached read confirmed
-	// during this reconcile.
-	confirmed string
 }
 
 // NewExternal returns the external client for a Rauthy instance. status writes
@@ -161,9 +158,9 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Client) (managed.Ex
 }
 
 // observe does the work of Observe. The cached object only decides cheap
-// refusals; anything that acts as the owner (reporting the client as existing,
-// reading its secret, and the Update and Delete that follow) needs ownership
-// confirmed by an uncached read.
+// refusals; anything that acts as the owner (reporting the client as existing
+// and reading its secret) needs ownership confirmed by an uncached read.
+// Update and Delete confirm it again themselves, right before they write.
 func (e *external) observe(ctx context.Context, cr *v1alpha1.Client) (managed.ExternalObservation, error) {
 	if err := e.checkBackend(ctx, cr); err != nil {
 		return managed.ExternalObservation{}, err
@@ -373,17 +370,12 @@ func (e *external) createFailed(ctx context.Context, id string, postErr error) e
 
 func (e *external) Update(ctx context.Context, cr *v1alpha1.Client) (managed.ExternalUpdate, error) {
 	id := meta.GetExternalName(cr)
-	o, err := e.ensureOwned(ctx, cr, id)
+	o, got, err := e.ensureOwned(ctx, cr, id)
 	if err != nil {
 		return managed.ExternalUpdate{}, err
 	}
 	if o != ownedClient {
 		return managed.ExternalUpdate{}, fmt.Errorf("client %q: %w", id, errNotOwned)
-	}
-
-	got, err := e.api.GetClient(ctx, id)
-	if err != nil {
-		return managed.ExternalUpdate{}, fmt.Errorf("cannot get Rauthy client %q: %w", id, err)
 	}
 	if err = checkConfidential(cr, got); err != nil {
 		return managed.ExternalUpdate{}, err
@@ -408,19 +400,19 @@ func (e *external) Delete(ctx context.Context, cr *v1alpha1.Client) (managed.Ext
 	id := meta.GetExternalName(cr)
 	cr.SetConditions(xpv2.Deleting())
 
-	o, err := e.ensureOwned(ctx, cr, id)
+	// Other records are checked uncached first; the client itself is
+	// confirmed last, right before the one call that cannot be undone.
+	taken, err := e.recordedElsewhere(ctx, cr, id)
+	if err != nil || taken {
+		return managed.ExternalDelete{}, err
+	}
+	o, _, err := e.ensureOwned(ctx, cr, id)
 	if err != nil {
 		return managed.ExternalDelete{}, err
 	}
 	if o != ownedClient {
 		// Never delete a client this resource did not create.
 		return managed.ExternalDelete{}, nil
-	}
-	// The ownership confirmation looked other records up in the cache;
-	// repeat that uncached before the one call that cannot be undone.
-	taken, err := e.recordedElsewhere(ctx, cr, id)
-	if err != nil || taken {
-		return managed.ExternalDelete{}, err
 	}
 
 	if err = e.api.DeleteClient(ctx, id); err != nil && !rauthy.IsNotFound(err) {
