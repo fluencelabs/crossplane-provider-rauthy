@@ -46,6 +46,9 @@ var (
 		"confidential cannot change after creation: the ownership record is bound to the client's secret; " +
 			"delete and recreate the Client to switch",
 	)
+	errCreationPending = errors.New(
+		"creation outcome is still unknown; retaining the Client until its pending proof can be resolved",
+	)
 	errCRDLacksOwnership = errors.New(
 		"the installed Client CRD does not keep status.ownership or its creation proof; upgrade the provider's CRDs; " +
 			"no further clients are created until the provider restarts with current CRDs",
@@ -269,6 +272,9 @@ func (e *external) clearStaleMarker(ctx context.Context, cr *v1alpha1.Client) er
 	}
 	// A 404 cannot rule out a POST that is still committing.
 	if fresh.Status.Ownership.Pending {
+		if meta.WasDeleted(cr) {
+			return errCreationPending
+		}
 		return nil
 	}
 	return e.clearOwnership(ctx, cr)
@@ -437,6 +443,9 @@ func (e *external) Delete(ctx context.Context, cr *v1alpha1.Client) (managed.Ext
 	}
 	if o != ownedClient {
 		// Never delete a client this resource did not create.
+		if cr.Status.Ownership != nil && cr.Status.Ownership.Pending {
+			return managed.ExternalDelete{}, errCreationPending
+		}
 		return managed.ExternalDelete{}, nil
 	}
 
