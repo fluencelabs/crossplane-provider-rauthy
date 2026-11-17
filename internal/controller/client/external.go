@@ -190,14 +190,14 @@ func (e *external) observe(ctx context.Context, cr *v1alpha1.Client) (managed.Ex
 		}
 	}
 
-	got, notFoundAt, err := e.lookup(ctx, id)
+	got, lookupStarted, err := e.lookup(ctx, id)
 	if err != nil {
 		return managed.ExternalObservation{}, err
 	}
 	if got == nil {
 		// S3 -> S0: a marker must not outlive its client. Clear it, and only
 		// then let the runtime create again or finalize.
-		if err = e.clearStaleMarker(ctx, cr, notFoundAt); err != nil {
+		if err = e.clearStaleMarker(ctx, cr, lookupStarted); err != nil {
 			return managed.ExternalObservation{}, err
 		}
 		return managed.ExternalObservation{ResourceExists: false}, nil
@@ -241,14 +241,15 @@ func (e *external) releasable(ctx context.Context, cr *v1alpha1.Client) (bool, e
 }
 
 // lookup returns the Rauthy client, or nil when there is none (or the id is
-// one Rauthy could never hold). Only a 404 carries the lookup completion time.
+// one Rauthy could never hold). Only a 404 carries the lookup start time.
 func (e *external) lookup(ctx context.Context, id string) (*rauthy.ClientResponse, time.Time, error) {
 	if !rauthy.ClientIDPattern().MatchString(id) {
 		return nil, time.Time{}, nil // An invalid id names no client.
 	}
+	started := e.clock.Now()
 	got, err := e.api.GetClient(ctx, id)
 	if rauthy.IsNotFound(err) {
-		return nil, e.clock.Now(), nil
+		return nil, started, nil
 	}
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("cannot get Rauthy client %q: %w", id, err)
@@ -259,7 +260,7 @@ func (e *external) lookup(ctx context.Context, id string) (*rauthy.ClientRespons
 // clearStaleMarker clears a finalized marker the API server holds while no client
 // exists. The cache may lag either way, so the decision comes from an
 // uncached read.
-func (e *external) clearStaleMarker(ctx context.Context, cr *v1alpha1.Client, notFoundAt time.Time) error {
+func (e *external) clearStaleMarker(ctx context.Context, cr *v1alpha1.Client, lookupStarted time.Time) error {
 	fresh, err := e.readFresh(ctx, cr)
 	if err != nil {
 		return err
@@ -278,16 +279,16 @@ func (e *external) clearStaleMarker(ctx context.Context, cr *v1alpha1.Client, no
 		if !meta.WasDeleted(cr) {
 			return nil
 		}
-		return e.settleAbsentCreation(ctx, cr, notFoundAt)
+		return e.settleAbsentCreation(ctx, cr, lookupStarted)
 	}
 	return e.clearOwnership(ctx, cr)
 }
 
-// settleAbsentCreation requires a 404 received after the request budget and
-// queue allowance for the last POST attempt.
-func (e *external) settleAbsentCreation(ctx context.Context, cr *v1alpha1.Client, notFoundAt time.Time) error {
+// settleAbsentCreation requires a 404 from a GET started after the request
+// budget and queue allowance for the last POST attempt.
+func (e *external) settleAbsentCreation(ctx context.Context, cr *v1alpha1.Client, lookupStarted time.Time) error {
 	deadline := cr.Status.Ownership.CreatedAt.Add(rauthyHTTPTimeout + creationQueueAllowance)
-	if notFoundAt.IsZero() || !notFoundAt.After(deadline) {
+	if lookupStarted.IsZero() || !lookupStarted.After(deadline) {
 		return errCreationPending
 	}
 	return e.clearOwnership(ctx, cr)
@@ -450,14 +451,14 @@ func (e *external) Delete(ctx context.Context, cr *v1alpha1.Client) (managed.Ext
 	if err != nil || taken {
 		return managed.ExternalDelete{}, err
 	}
-	o, _, notFoundAt, err := e.ensureOwned(ctx, cr, id)
+	o, _, lookupStarted, err := e.ensureOwned(ctx, cr, id)
 	if err != nil {
 		return managed.ExternalDelete{}, err
 	}
 	if o != ownedClient {
 		// Never delete a client this resource did not create.
 		if cr.Status.Ownership != nil && cr.Status.Ownership.Pending {
-			return managed.ExternalDelete{}, e.settleAbsentCreation(ctx, cr, notFoundAt)
+			return managed.ExternalDelete{}, e.settleAbsentCreation(ctx, cr, lookupStarted)
 		}
 		return managed.ExternalDelete{}, nil
 	}

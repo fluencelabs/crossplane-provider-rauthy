@@ -73,6 +73,16 @@ func TestDirectDeletePendingCreationExpires(t *testing.T) {
 	f := newFakeRauthy(t)
 	f.failPost = true
 	clk := clocktest.NewFakeClock(time.Now().UTC().Truncate(time.Second))
+	var delay404 atomic.Bool
+	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/auth/v1/clients/app" && delay404.Swap(false) {
+			// The lookup starts at +59s, but the 404 reaches Delete at +61s.
+			clk.Step(2 * time.Second)
+			writeError(w, http.StatusNotFound, "client not found")
+			return
+		}
+		f.serve(w, r)
+	})
 	h := newHarnessWithClock(t, f, newClient(), clk)
 	cr := h.reconcile(t, 1)
 	c := &client.Connector{Kube: h.kube, Usage: &noopTracker{}, Clock: clk}
@@ -88,7 +98,14 @@ func TestDirectDeletePendingCreationExpires(t *testing.T) {
 	if diff := cmp.Diff(proof, cr.Status.Ownership); diff != "" {
 		t.Fatalf("Delete lost fresh pending proof: %s", diff)
 	}
-	clk.Step(time.Minute + time.Second)
+	clk.Step(59 * time.Second)
+	delay404.Store(true)
+	if _, err = e.Delete(t.Context(), cr); err == nil || delay404.Load() {
+		t.Fatalf("Delete must reject the delayed 404: %v", err)
+	}
+	if diff := cmp.Diff(proof, h.reconcile(t, 0).Status.Ownership); diff != "" {
+		t.Fatalf("delayed 404 changed pending proof: %s", diff)
+	}
 	if _, err = e.Delete(t.Context(), cr); err != nil || cr.Status.Ownership != nil {
 		t.Fatalf("Delete failed to settle absent pending client: %v, %+v", err, cr.Status.Ownership)
 	}
@@ -97,6 +114,56 @@ func TestDirectDeletePendingCreationExpires(t *testing.T) {
 	}
 	if f.stored() != nil || slices.Contains(f.callLog(), "DELETE /clients/app") {
 		t.Fatal("Delete mutated an absent Rauthy client")
+	}
+}
+
+func TestReconcilerDeletePendingCreationOnLookupError(t *testing.T) {
+	for _, status := range []int{http.StatusForbidden, http.StatusInternalServerError} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			testDeletePendingCreationOnLookupError(t, status)
+		})
+	}
+}
+
+func testDeletePendingCreationOnLookupError(t *testing.T, status int) {
+	t.Helper()
+	f := newFakeRauthy(t)
+	f.commitThenFail = true
+	var failGet atomic.Bool
+	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if failGet.Load() && r.Method == http.MethodGet && r.URL.Path == "/auth/v1/clients/app" {
+			writeError(w, status, http.StatusText(status))
+			return
+		}
+		f.serve(w, r)
+	})
+	clk := clocktest.NewFakeClock(time.Now().UTC().Truncate(time.Second))
+	h := newHarnessWithClock(t, f, newClient(), clk)
+	cr := h.reconcile(t, 1)
+	proof := cr.Status.Ownership.DeepCopy()
+	if proof == nil || !proof.Pending || f.stored() == nil {
+		t.Fatal("POST did not leave both a client and pending proof")
+	}
+	h.ageCreate(t)
+	if err := h.kube.Delete(t.Context(), h.reconcile(t, 0)); err != nil {
+		t.Fatal(err)
+	}
+	clk.Step(time.Minute + time.Second)
+	f.resetCalls()
+	failGet.Store(true)
+	got := h.reconcile(t, 1)
+	if got == nil || len(got.Finalizers) == 0 {
+		t.Fatalf("Client finalized on GET %d", status)
+	}
+	if diff := cmp.Diff(proof, got.Status.Ownership); diff != "" {
+		t.Fatalf("GET %d changed pending proof: %s", status, diff)
+	}
+	if f.stored() == nil || slices.Contains(f.callLog(), "DELETE /clients/app") {
+		t.Fatalf("GET %d caused a Rauthy deletion", status)
+	}
+	failGet.Store(false)
+	if got = h.reconcile(t, 4); got != nil || f.stored() != nil {
+		t.Fatal("the next reconcile did not delete the client and finalize")
 	}
 }
 
@@ -134,9 +201,15 @@ func TestDeletePendingCreationUsesHTTPTimeout(t *testing.T) {
 	f := newFakeRauthy(t)
 	f.failPost = true
 	var stall atomic.Bool
+	canceled := make(chan struct{})
+	testCtx := t.Context()
 	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if stall.Load() && r.Method == http.MethodGet && r.URL.Path == "/auth/v1/clients/app" {
-			<-r.Context().Done()
+		if r.Method == http.MethodGet && r.URL.Path == "/auth/v1/clients/app" && stall.Swap(false) {
+			select {
+			case <-r.Context().Done():
+				close(canceled)
+			case <-testCtx.Done():
+			}
 			return
 		}
 		f.serve(w, r)
@@ -152,21 +225,24 @@ func TestDeletePendingCreationUsesHTTPTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Use the same 30-second request budget that the 60-second settlement window allows.
-	const requestBudget = 30 * time.Second
-	ctx, cancel := context.WithTimeout(t.Context(), requestBudget+5*time.Second)
+	// The settlement window allows 30s for the request and 30s for the queue.
+	// Leave one second for scheduling and HTTP cleanup when measuring wall time.
+	const requestBudget, maxElapsed = 30 * time.Second, 31 * time.Second
+	ctx, cancel := context.WithTimeout(testCtx, requestBudget+5*time.Second)
 	defer cancel()
 	stall.Store(true)
 	started := time.Now()
 	_, err = e.Delete(ctx, cr)
-	if elapsed := time.Since(started); !errors.Is(err, context.DeadlineExceeded) ||
-		ctx.Err() != nil || elapsed < requestBudget {
-		t.Fatalf(
-			"Delete after %s: %v (parent context: %v), want the %s HTTP timeout",
-			elapsed,
-			err,
-			ctx.Err(),
-			requestBudget,
-		)
+	elapsed := time.Since(started)
+	if !errors.Is(err, context.DeadlineExceeded) ||
+		ctx.Err() != nil || elapsed < requestBudget || elapsed > maxElapsed {
+		t.Fatalf("Delete after %s: %v (parent context: %v), want HTTP timeout in [%s, %s]",
+			elapsed, err, ctx.Err(), requestBudget, maxElapsed)
+	}
+	select {
+	case <-canceled:
+		t.Logf("The server observed cancellation after the client timed out in %s.", elapsed)
+	case <-time.After(time.Second):
+		t.Fatal("server did not observe cancellation of the stalled GET")
 	}
 }
