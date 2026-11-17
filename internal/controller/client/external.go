@@ -119,11 +119,22 @@ func newExternal(
 	}
 }
 
-// Observe reads the client and decides whether this resource owns it. The
-// cached object only decides cheap refusals; anything that acts as the owner
-// (reporting the client as existing, reading its secret, and the Update and
-// Delete that follow) needs ownership confirmed by an uncached read.
+// Observe reads the client and decides whether this resource owns it. A
+// resource that cannot be observed, or that the controller refuses to manage,
+// is not Ready: an earlier Ready must not outlive the state that justified it.
 func (e *external) Observe(ctx context.Context, cr *v1alpha1.Client) (managed.ExternalObservation, error) {
+	o, err := e.observe(ctx, cr)
+	if err != nil && !meta.WasDeleted(cr) {
+		cr.SetConditions(xpv2.Unavailable())
+	}
+	return o, err
+}
+
+// observe does the work of Observe. The cached object only decides cheap
+// refusals; anything that acts as the owner (reporting the client as existing,
+// reading its secret, and the Update and Delete that follow) needs ownership
+// confirmed by an uncached read.
+func (e *external) observe(ctx context.Context, cr *v1alpha1.Client) (managed.ExternalObservation, error) {
 	id := meta.GetExternalName(cr)
 	if err := checkRecordID(cr, id); err != nil {
 		return managed.ExternalObservation{}, err
@@ -139,7 +150,6 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Client) (managed.Ex
 			return managed.ExternalObservation{}, err
 		}
 		if err := checkPKCE(&cr.Spec.ForProvider, nil); err != nil {
-			cr.SetConditions(xpv2.Unavailable())
 			return managed.ExternalObservation{}, err
 		}
 	}
@@ -244,7 +254,6 @@ func (e *external) observeOwned(
 		return managed.ExternalObservation{}, err
 	}
 	if err := checkPKCE(&cr.Spec.ForProvider, got); err != nil {
-		cr.SetConditions(xpv2.Unavailable())
 		return managed.ExternalObservation{}, err
 	}
 

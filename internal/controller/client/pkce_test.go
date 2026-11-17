@@ -217,3 +217,43 @@ func TestUpdatePublicUnsetChallengesChecksObserved(t *testing.T) {
 		}
 	}
 }
+
+// A refusal that comes before the PKCE check still clears an earlier Ready.
+func TestReconcilerEarlyRefusalClearsReady(t *testing.T) {
+	t.Parallel()
+	for name, refuse := range map[string]func(*testing.T, *harness, *v1alpha1.Client){
+		"ownership lost": func(t *testing.T, h *harness, cr *v1alpha1.Client) {
+			t.Helper()
+			cr.Status.Ownership = nil
+			if err := h.kube.Status().Update(context.Background(), cr); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"observe only": func(t *testing.T, h *harness, cr *v1alpha1.Client) {
+			t.Helper()
+			cr.Spec.ManagementPolicies = xpv2.ManagementPolicies{xpv2.ManagementActionObserve}
+			if err := h.kube.Update(context.Background(), cr); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeRauthy(t)
+			stored := existing(false)
+			f.put(stored)
+			h := newHarness(t, f, newClient(owned, public, finalized))
+			got := h.reconcile(t, 3)
+			if conditionStatus(got, xpv2.TypeReady) != "True" {
+				t.Fatalf("setup: conditions %+v, want Ready", got.Status.Conditions)
+			}
+			refuse(t, h, got)
+			stored.Challenges = []string{}
+			f.put(stored)
+			got = h.reconcile(t, 3)
+			if conditionStatus(got, xpv2.TypeReady) == "True" || conditionStatus(got, xpv2.TypeSynced) != "False" {
+				t.Fatalf("conditions %+v; want not Ready and not Synced", got.Status.Conditions)
+			}
+		})
+	}
+}
