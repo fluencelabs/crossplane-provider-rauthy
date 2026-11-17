@@ -75,6 +75,9 @@ func TestCreateRequestFields(t *testing.T) {
 			if got == nil {
 				t.Fatal("client was not created")
 			}
+			if !validClientName(got.Name) {
+				t.Fatal("POST name does not match both Rauthy name patterns")
+			}
 			if !matchesCreationName(cr, got.Name) {
 				t.Fatal("POST name is not bound by the creation record")
 			}
@@ -143,6 +146,28 @@ func TestObserveForceMFADrift(t *testing.T) {
 			obs, err = e.Observe(context.Background(), cr)
 			if err != nil || !obs.ResourceUpToDate || readyStatus(cr) != "True" {
 				t.Fatalf("Observe after update = %+v, %v", obs, err)
+			}
+		})
+	}
+}
+
+func TestFakeCreateRejectsInvalidNames(t *testing.T) {
+	for _, name := range []string{"x", strings.Repeat("a", 129), "<script>", "bad/name", "ok-name"} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeRauthy(t)
+			req := httptest.NewRequest(
+				http.MethodPost,
+				rauthy.APIBasePath+"/clients",
+				strings.NewReader(`{"id":"app","name":"`+name+`","confidential":true,"redirect_uris":[]}`),
+			)
+			rec := httptest.NewRecorder()
+			f.serve(rec, req)
+			want := http.StatusBadRequest
+			if name == "ok-name" {
+				want = http.StatusOK
+			}
+			if rec.Code != want {
+				t.Fatalf("POST name %q: status %d, want %d", name, rec.Code, want)
 			}
 		})
 	}

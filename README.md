@@ -146,7 +146,10 @@ this resource's client with that id exists in Rauthy.**
 | S4    | id on another `Client` too | any | Refused with the message above: never created, published, updated or deleted. Deleting the `Client` finalizes it without touching Rauthy. |
 
 - **Create** (S0): before POST, persist a pending ownership record containing
-  the hash of a random temporary Rauthy client name. The POST uses that name.
+  the hash of a temporary Rauthy client name. The API key, resource UID,
+  backend, client id and persisted random nonce derive the name with HMAC-SHA256.
+  Status readers cannot reproduce it. An absent observation retains pending
+  proof, and each POST retry uses the same name, including after restart.
   Confirm the name, read the secret, then confirm the name again before
   recording the final secret fingerprint. A transient read or status failure
   leaves the pending proof for the next reconcile, including after restart.
@@ -154,7 +157,7 @@ this resource's client with that id exists in Rauthy.**
   client. The first owned Update restores the requested name, including an
   unset name. A CRD that prunes the pending proof prevents POST entirely.
   Pending proofs do not reserve the id. Concurrent attempts are distinguished
-  by the random name in Rauthy. A losing attempt clears its stale proof on
+  by the derived name in Rauthy. A losing attempt clears its stale proof on
   the next reconcile, and cannot block the successful creator.
 - **Delete** (S2): the DELETE, then the record is cleared at once.
 - **A client that disappears** (S2 to S3, by Delete or out of band): the next
@@ -229,8 +232,9 @@ the main resource, so a manifest cannot carry ownership. What it does rely on:
 The create call itself knows how it ended, and its error says so once:
 
 - **Rauthy refuses the create** (a 4xx answer) and a client with that id
-  exists: `client "<id>" already exists in Rauthy and was not created by this
-  resource; choose another id`.
+  exists: a matching pending proof finishes ownership, including a late commit
+  of an earlier POST. A different name is refused: `client "<id>" already exists
+  in Rauthy and was not created by this resource; choose another id`.
 - **The create request fails ambiguously** (a timeout, a transport error or a
   5xx answer) and a client with that id exists afterwards: `create outcome
   unknown: the request failed but a client with id "<id>" now exists; the next
@@ -242,7 +246,9 @@ The create call itself knows how it ended, and its error says so once:
   stops creating clients until it is restarted with current CRDs.
 
 On subsequent reconciles, a matching pending creation resumes. An unrelated
-client is refused without mutation.
+client is refused without mutation. If the API key changes while a create is
+pending and no client exists yet, restore the original key to retry that proof.
+An existing client can still be verified by its stored name hash.
 
 ## Install
 

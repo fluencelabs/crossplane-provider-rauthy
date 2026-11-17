@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/fluencelabs/rauthy-go"
+
 	"k8s.io/apimachinery/pkg/types"
 	kube "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -35,7 +37,7 @@ func TestLegacyDuplicateRecordBlocksDelete(t *testing.T) {
 		}
 	}
 	// A refused delete leaves Rauthy untouched; the error, if any, is not the point.
-	_, _ = client.NewExternal(f.api(t), k.Status(), k, testIssuer).Delete(ctx, first)
+	_, _ = client.NewExternal(f.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key")).Delete(ctx, first)
 	if f.stored() == nil {
 		t.Fatal("the client was deleted while another legacy record names it")
 	}

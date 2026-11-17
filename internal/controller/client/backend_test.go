@@ -39,10 +39,12 @@ func TestIndependentBackendsAllowSameID(t *testing.T) {
 	second := newClient(public, func(cr *v1alpha1.Client) { cr.Namespace = "other" })
 	second.SetUID(types.UID("second"))
 	k := newKube(t, a, first, second)
-	if _, err := client.NewExternal(a.api(t), k.Status(), k, testIssuer).Create(ctx, first); err != nil {
+	if _, err := client.NewExternal(a.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key")).
+		Create(ctx, first); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.NewExternal(b.api(t), k.Status(), k, testIssuer).Create(ctx, second); err != nil {
+	if _, err := client.NewExternal(b.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key")).
+		Create(ctx, second); err != nil {
 		t.Fatal(err)
 	}
 	for _, cr := range []*v1alpha1.Client{first, second} {
@@ -50,7 +52,8 @@ func TestIndependentBackendsAllowSameID(t *testing.T) {
 		if cr == second {
 			f = b
 		}
-		obs, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Observe(ctx, cr)
+		obs, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key")).
+			Observe(ctx, cr)
 		if err != nil || !obs.ResourceExists {
 			t.Fatalf("Observe: %+v, %v", obs, err)
 		}
@@ -73,14 +76,15 @@ func checkBackendSwitch(t *testing.T, missing bool) {
 	a, b := newFakeRauthy(t), newFakeRauthy(t)
 	cr := newClient(public)
 	k := newKube(t, a, cr)
-	if _, err := client.NewExternal(a.api(t), k.Status(), k, testIssuer).Create(ctx, cr); err != nil {
+	if _, err := client.NewExternal(a.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key")).
+		Create(ctx, cr); err != nil {
 		t.Fatal(err)
 	}
 	if !missing {
 		b.put(existing(false))
 	}
 	before := b.stored()
-	e := client.NewExternal(b.api(t), k.Status(), k, testIssuer)
+	e := client.NewExternal(b.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key"))
 	if _, err := e.Observe(ctx, cr); err == nil {
 		t.Error("Observe accepted another backend")
 	}
@@ -220,7 +224,8 @@ func TestLegacyRecordBindsToCurrentBackend(t *testing.T) {
 	if err := k.Status().Update(ctx, stored); err != nil {
 		t.Fatal(err)
 	}
-	obs, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Observe(ctx, stored)
+	obs, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key")).
+		Observe(ctx, stored)
 	if err != nil || !obs.ResourceExists {
 		t.Fatalf("Observe of a legacy record = %+v, %v; want the client managed", obs, err)
 	}
@@ -263,7 +268,7 @@ func checkCredentialBackend(t *testing.T, legacy bool) {
 	}
 	for i, credentials := range []string{"operator:synthetic-password", "rotated:synthetic-replacement"} {
 		api := credentialAPI(t, f, credentials)
-		e := client.NewExternal(api, k.Status(), k, testIssuer)
+		e := client.NewExternal(api, k.Status(), k, testIssuer, rauthy.NewSecret("test$key"))
 		if !legacy && i == 0 {
 			if _, err := e.Create(ctx, cr); err != nil {
 				t.Fatal(err)

@@ -10,9 +10,12 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/fluencelabs/rauthy-go"
 	"github.com/google/go-cmp/cmp"
 	kube "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+
+	"github.com/fluencelabs/crossplane-provider-rauthy/internal/controller/client"
 
 	"github.com/fluencelabs/crossplane-provider-rauthy/apis/v1alpha1"
 )
@@ -251,5 +254,46 @@ func TestReconcilerPendingWithoutClientRetriesCreate(t *testing.T) {
 	got = h.reconcile(t, 10)
 	if readyStatus(got) != "True" || got.Status.Ownership.Pending || f.stored() == nil {
 		t.Fatalf("absent pending creation did not recover: %+v", got.Status)
+	}
+}
+
+func TestPendingProofSurvivesAbsenceAndKeyChange(t *testing.T) {
+	f := newFakeRauthy(t)
+	f.failPost = true
+	cr := newClient()
+	k := newKube(t, f, cr)
+	e := client.NewExternal(f.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key"))
+	if _, err := e.Create(t.Context(), cr); err == nil {
+		t.Fatal("expected POST failure")
+	}
+	proof := cr.Status.Ownership.DeepCopy()
+	obs, err := e.Observe(t.Context(), cr)
+	if err != nil || obs.ResourceExists {
+		t.Fatalf("absent observation = %+v, %v", obs, err)
+	}
+	if diff := cmp.Diff(proof, cr.Status.Ownership); diff != "" {
+		t.Fatalf("404 changed pending proof: %s", diff)
+	}
+	f.resetCalls()
+	rotated := client.NewExternal(f.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("rotated$key"))
+	if _, err = rotated.Create(
+		t.Context(),
+		cr,
+	); err == nil ||
+		!strings.Contains(err.Error(), "cannot reproduce pending creation proof") {
+		t.Fatalf("key change = %v", err)
+	}
+	if diff := cmp.Diff(proof, cr.Status.Ownership); diff != "" {
+		t.Fatalf("key change discarded proof: %s", diff)
+	}
+	if calls := f.callLog(); len(calls) != 0 {
+		t.Fatalf("key change sent requests: %v", calls)
+	}
+	f.failPost = false
+	if _, err = e.Create(t.Context(), cr); err != nil {
+		t.Fatal(err)
+	}
+	if !matchesCreationName(cr, f.stored().Name) || cr.Status.Ownership.CreationNameHash != proof.CreationNameHash {
+		t.Fatal("retry changed creation proof")
 	}
 }

@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fluencelabs/rauthy-go"
+
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
@@ -112,7 +114,7 @@ func newKube(t *testing.T, f *fakeRauthy, objs ...*v1alpha1.Client) kube.Client 
 func newExternal(t *testing.T, f *fakeRauthy, cr *v1alpha1.Client) managed.TypedExternalClient[*v1alpha1.Client] {
 	t.Helper()
 	k := newKube(t, f, cr)
-	return client.NewExternal(f.api(t), k.Status(), k, testIssuer)
+	return client.NewExternal(f.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key"))
 }
 
 func public(cr *v1alpha1.Client) { cr.Spec.ForProvider.Confidential = false }

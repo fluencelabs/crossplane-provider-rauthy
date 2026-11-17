@@ -6,9 +6,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/fluencelabs/rauthy-go"
 )
@@ -190,6 +192,29 @@ func (f *fakeRauthy) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Rauthy v0.36.2 and v0.37.2 src/common/src/regex.rs, RE_CLIENT_NAME.
+func validClientName(name *string) bool {
+	clientNamePatterns := []*regexp.Regexp{
+		regexp.MustCompile(
+			`^[a-zA-Z0-9À-ɏ()\-\s\x{000B}\x{0085}\p{Z}\x{3041}-\x{3096}\x{30A0}-\x{30FF}\x{3400}-\x{4DB5}\x{4E00}-\x{9FCB}\x{F900}-\x{FA6A}\x{2E80}-\x{2FD5}\x{FF66}-\x{FF9F}\x{FFA1}-\x{FFDC}\x{31F0}-\x{31FF}]+$`,
+		),
+		regexp.MustCompile(`^[\p{L}\p{M}\p{N}\p{Zs}()._-]+$`),
+	}
+	if name == nil {
+		return true
+	}
+	n := utf8.RuneCountInString(*name)
+	if n < 2 || n > 128 {
+		return false
+	}
+	for _, pattern := range clientNamePatterns {
+		if !pattern.MatchString(*name) {
+			return false
+		}
+	}
+	return true
+}
+
 func (f *fakeRauthy) create(w http.ResponseWriter, r *http.Request) {
 	if f.failPost {
 		writeError(w, http.StatusInternalServerError, "database unavailable")
@@ -207,6 +232,10 @@ func (f *fakeRauthy) create(w http.ResponseWriter, r *http.Request) {
 	var req rauthy.NewClientRequest
 	if err = json.Unmarshal(raw, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !validClientName(req.Name) {
+		writeError(w, http.StatusBadRequest, "invalid client name")
 		return
 	}
 	if f.raceOnPost != nil {
@@ -289,7 +318,7 @@ func (f *fakeRauthy) update(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	f.lastPut = &req
 	f.lastPutRaw = raw
-	if req.Name != nil && *req.Name == "" {
+	if !validClientName(req.Name) {
 		writeError(w, http.StatusBadRequest, "name must contain at least two characters")
 		return
 	}

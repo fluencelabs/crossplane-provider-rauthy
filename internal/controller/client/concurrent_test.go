@@ -5,6 +5,8 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/fluencelabs/rauthy-go"
+
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	kube "sigs.k8s.io/controller-runtime/pkg/client"
@@ -82,7 +84,7 @@ func checkNoStaleWrite(
 		setup(f)
 	}
 	k := newKube(t, f, want)
-	e := client.NewExternal(f.api(t), k.Status(), k, testIssuer)
+	e := client.NewExternal(f.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key"))
 
 	// The reconciler's read.
 	cr := &v1alpha1.Client{}

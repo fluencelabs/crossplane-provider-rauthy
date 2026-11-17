@@ -407,16 +407,19 @@ func TestStaleCachedOwnershipIsNotTrusted(t *testing.T) {
 	stale := truth.DeepCopy()
 	owned(stale)
 
-	obs, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Observe(ctx, stale.DeepCopy())
+	obs, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key")).
+		Observe(ctx, stale.DeepCopy())
 	if !errors.Is(err, client.ErrAdoption) || obs.ResourceExists || obs.ConnectionDetails != nil {
 		t.Errorf("Observe = %+v, %v; want an adoption error and nothing published", obs, err)
 	}
-	if _, err = client.NewExternal(f.api(t), k.Status(), k, testIssuer).Update(ctx, stale.DeepCopy()); err == nil {
+	if _, err = client.NewExternal(f.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key")).
+		Update(ctx, stale.DeepCopy()); err == nil {
 		t.Error("Update trusted the cached ownership")
 	}
 	gone := stale.DeepCopy()
 	deleting(gone)
-	if _, err = client.NewExternal(f.api(t), k.Status(), k, testIssuer).Delete(ctx, gone); err != nil {
+	if _, err = client.NewExternal(f.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key")).
+		Delete(ctx, gone); err != nil {
 		t.Errorf("Delete: %v", err)
 	}
 
@@ -487,7 +490,8 @@ func TestObserveClearsMarkerOfMissingClient(t *testing.T) {
 				cr = tc.cached(cr)
 			}
 
-			obs, err := client.NewExternal(f.api(t), k.Status(), base, testIssuer).Observe(context.Background(), cr)
+			obs, err := client.NewExternal(f.api(t), k.Status(), base, testIssuer, rauthy.NewSecret("test$key")).
+				Observe(context.Background(), cr)
 
 			checkErr(t, tc.reason, err, tc.wantErr, nil)
 			if obs.ResourceExists != tc.wantExists {
@@ -507,7 +511,8 @@ func TestDeleteClearsMarker(t *testing.T) {
 	cr := newClient(owned, deleting)
 	k := newKube(t, f, cr)
 
-	if _, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Delete(context.Background(), cr); err != nil {
+	if _, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key")).
+		Delete(context.Background(), cr); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	if f.stored() != nil {
@@ -539,7 +544,8 @@ func TestRecordForAnotherIDIsKept(t *testing.T) {
 			cached := truth.DeepCopy()
 			cached.Status.Ownership = nil
 
-			obs, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Observe(context.Background(), cached)
+			obs, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer, rauthy.NewSecret("test$key")).
+				Observe(context.Background(), cached)
 
 			checkErr(
 				t,
