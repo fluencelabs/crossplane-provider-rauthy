@@ -213,7 +213,7 @@ func (e *external) recordedElsewhere(ctx context.Context, cr *v1alpha1.Client, i
 		return false, fmt.Errorf("cannot confirm ownership of client %q: cannot list Clients without the cache: %w",
 			id, err)
 	}
-	return e.refusedFor(cr, otherRecord(all.Items, cr, id, e.backendURL), id), nil
+	return e.refusedFor(cr, otherRecord(all.Items, cr, id, e.backend), id), nil
 }
 
 // recordedElsewhereCached is recordedElsewhere answered from the cache,
@@ -231,7 +231,7 @@ func (e *external) recordedElsewhereCached(ctx context.Context, cr *v1alpha1.Cli
 	if err := e.cache.List(ctx, same, kube.MatchingFields{ClientIDIndex: id}); err != nil {
 		return false, fmt.Errorf("cannot confirm ownership of client %q: cannot look up other records: %w", id, err)
 	}
-	return e.refusedFor(cr, otherRecord(same.Items, cr, id, e.backendURL), id), nil
+	return e.refusedFor(cr, otherRecord(same.Items, cr, id, e.backend), id), nil
 }
 
 // refusedFor reports whether other blocks cr and, if so, names other in the
@@ -251,12 +251,12 @@ func (e *external) refusedFor(cr, other *v1alpha1.Client, id string) bool {
 }
 
 // otherRecord returns a Client among items, other than cr, that records id.
-func otherRecord(items []v1alpha1.Client, cr *v1alpha1.Client, id, backendURL string) *v1alpha1.Client {
+func otherRecord(items []v1alpha1.Client, cr *v1alpha1.Client, id, backend string) *v1alpha1.Client {
 	for i := range items {
 		// A record without a backend URL predates the binding: it was made
 		// through the only backend its resource had, which may be this one.
 		if other := &items[i]; other.GetUID() != cr.GetUID() && ownedClientID(other) == id &&
-			(other.Status.Ownership.BackendURL == backendURL || other.Status.Ownership.BackendURL == "") {
+			(other.Status.Ownership.Backend == backend || other.Status.Ownership.Backend == "") {
 			return other
 		}
 	}
@@ -325,7 +325,7 @@ func (e *external) patchOwnership(
 
 // sameRecord reports whether the stored record is the one that was written.
 func sameRecord(stored, want *v1alpha1.ClientOwnership) bool {
-	return stored != nil && stored.ClientID == want.ClientID && stored.BackendURL == want.BackendURL &&
+	return stored != nil && stored.ClientID == want.ClientID && stored.Backend == want.Backend &&
 		stored.SecretFingerprint == want.SecretFingerprint
 }
 
@@ -357,7 +357,7 @@ func (e *external) recordOwnership(ctx context.Context, cr *v1alpha1.Client, id,
 	}
 	marker := &v1alpha1.ClientOwnership{
 		ClientID:          id,
-		BackendURL:        e.backendURL,
+		Backend:           e.backend,
 		CreatedAt:         metav1.NewTime(time.Now()),
 		SecretFingerprint: fingerprint,
 	}
@@ -509,13 +509,13 @@ func (e *external) checkBackend(ctx context.Context, cr *v1alpha1.Client) error 
 func (e *external) bindBackend(ctx context.Context, cr *v1alpha1.Client) error {
 	rec := cr.Status.Ownership
 	switch {
-	case rec == nil || rec.BackendURL == e.backendURL:
+	case rec == nil || rec.Backend == e.backend:
 		return nil
-	case rec.BackendURL != "":
+	case rec.Backend != "":
 		return errBackendChanged
 	}
 	want := rec.DeepCopy()
-	want.BackendURL = e.backendURL
+	want.Backend = e.backend
 	stored, _, err := e.patchOwnership(ctx, cr, want)
 	if err != nil {
 		return fmt.Errorf("cannot bind the ownership record to the Rauthy backend: %w", err)

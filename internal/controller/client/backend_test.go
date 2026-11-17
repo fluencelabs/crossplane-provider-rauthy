@@ -216,7 +216,7 @@ func TestLegacyRecordBindsToCurrentBackend(t *testing.T) {
 	if err := k.Get(ctx, kube.ObjectKeyFromObject(cr), stored); err != nil {
 		t.Fatal(err)
 	}
-	stored.Status.Ownership.BackendURL = ""
+	stored.Status.Ownership.Backend = ""
 	if err := k.Status().Update(ctx, stored); err != nil {
 		t.Fatal(err)
 	}
@@ -228,8 +228,9 @@ func TestLegacyRecordBindsToCurrentBackend(t *testing.T) {
 	if err = k.Get(ctx, kube.ObjectKeyFromObject(cr), after); err != nil {
 		t.Fatal(err)
 	}
-	if want := f.srv.URL + "/auth/v1"; after.Status.Ownership == nil || after.Status.Ownership.BackendURL != want {
-		t.Fatalf("stored ownership = %+v, want backendURL %q", after.Status.Ownership, want)
+	want := backendOf(f.srv.URL + "/auth/v1")
+	if after.Status.Ownership == nil || after.Status.Ownership.Backend != want {
+		t.Fatalf("stored ownership = %+v, want backend %q", after.Status.Ownership, want)
 	}
 }
 
@@ -277,7 +278,7 @@ func checkCredentialBackend(t *testing.T, legacy bool) {
 		if err := k.Get(ctx, kube.ObjectKeyFromObject(cr), stored); err != nil {
 			t.Fatal(err)
 		}
-		assertCredentialFreeBackend(t, stored, f.srv.URL+"/auth/v1", credentials)
+		assertCredentialFreeBackend(t, stored, backendOf(f.srv.URL+"/auth/v1"), credentials)
 	}
 }
 
@@ -298,7 +299,7 @@ func credentialAPI(t *testing.T, f *fakeRauthy, credentials string) *rauthy.Clie
 
 func assertCredentialFreeBackend(t *testing.T, cr *v1alpha1.Client, want, credentials string) {
 	t.Helper()
-	if cr.Status.Ownership == nil || cr.Status.Ownership.BackendURL != want {
+	if cr.Status.Ownership == nil || cr.Status.Ownership.Backend != want {
 		t.Errorf("ownership = %+v, want backend %q", cr.Status.Ownership, want)
 	}
 	status, err := json.Marshal(cr.Status)

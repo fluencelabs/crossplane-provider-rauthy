@@ -110,12 +110,12 @@ record was made for.
   controller): switching would change the binding. Delete and recreate the
   `Client` to switch.
 
-Ownership records include the Rauthy API root (`backendURL`). A changed
+Ownership records include a fingerprint of the Rauthy API root (`backend`): a hash, so no part of the URL appears in status. A changed
 `providerConfigRef` or ProviderConfig URL cannot transfer ownership to another
 Rauthy instance, even if it contains a public client with the same id. Restore
 the original URL to resume reconciliation and deletion. Independent Rauthy
 instances can each manage the same client id. A record written by an earlier
-release has no `backendURL`; the provider binds it to the current
+release has no `backend`; the provider binds it to the current
 ProviderConfig URL on its first reconcile, so upgrade before changing the URL.
 
 Before it acts as the owner (reports the client as existing, reads or

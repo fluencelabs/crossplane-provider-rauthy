@@ -29,7 +29,7 @@ func TestLegacyDuplicateRecordBlocksDelete(t *testing.T) {
 		if err := k.Get(ctx, kube.ObjectKeyFromObject(cr), stored); err != nil {
 			t.Fatal(err)
 		}
-		stored.Status.Ownership.BackendURL = ""
+		stored.Status.Ownership.Backend = ""
 		if err := k.Status().Update(ctx, stored); err != nil {
 			t.Fatal(err)
 		}
