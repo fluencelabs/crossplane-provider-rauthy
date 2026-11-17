@@ -24,7 +24,7 @@ func TestBackendBindingPrunedCRD(t *testing.T) {
 			if err := k.Get(ctx, kube.ObjectKeyFromObject(cr), cr); err != nil {
 				t.Fatal(err)
 			}
-			cr.Status.Ownership.BackendURL = ""
+			cr.Status.Ownership.Backend = ""
 			if err := k.Status().Update(ctx, cr); err != nil {
 				t.Fatal(err)
 			}
