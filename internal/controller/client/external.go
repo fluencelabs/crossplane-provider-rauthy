@@ -17,6 +17,7 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	"github.com/fluencelabs/rauthy-go"
+	"k8s.io/utils/clock"
 	kube "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/fluencelabs/crossplane-provider-rauthy/apis/v1alpha1"
@@ -89,6 +90,7 @@ type api interface {
 // spec. A failing PUT is therefore retried as an ordinary update of a client
 // the resource is known to own.
 type external struct {
+	clock  clock.PassiveClock
 	api    api
 	status kube.SubResourceWriter
 	// reader reads the Client from the API server, bypassing the cache.
@@ -148,7 +150,7 @@ func newExternal(
 ) *external {
 	return &external{
 		api: c, status: status, reader: reader, cache: cache, issuer: issuer, backend: backend, crd: crd,
-		log: logging.NewNopLogger(), proofKey: proofKey,
+		log: logging.NewNopLogger(), proofKey: proofKey, clock: clock.RealClock{},
 	}
 }
 
@@ -270,12 +272,21 @@ func (e *external) clearStaleMarker(ctx context.Context, cr *v1alpha1.Client) er
 	if err = checkRecordID(fresh, meta.GetExternalName(cr)); err != nil {
 		return err
 	}
-	// A 404 cannot rule out a POST that is still committing.
-	if fresh.Status.Ownership.Pending {
-		if meta.WasDeleted(cr) {
-			return errCreationPending
+	// A 404 within the request and queue budget cannot settle a pending POST.
+	if rec := fresh.Status.Ownership; rec.Pending {
+		if !meta.WasDeleted(cr) {
+			return nil
 		}
-		return nil
+		return e.settleAbsentCreation(ctx, cr)
+	}
+	return e.clearOwnership(ctx, cr)
+}
+
+// settleAbsentCreation releases an absent pending client after the configured
+// request budget and queue allowance have elapsed since the last POST attempt.
+func (e *external) settleAbsentCreation(ctx context.Context, cr *v1alpha1.Client) error {
+	if !e.clock.Now().After(cr.Status.Ownership.CreatedAt.Add(rauthyHTTPTimeout + creationQueueAllowance)) {
+		return errCreationPending
 	}
 	return e.clearOwnership(ctx, cr)
 }
@@ -437,13 +448,16 @@ func (e *external) Delete(ctx context.Context, cr *v1alpha1.Client) (managed.Ext
 	if err != nil || taken {
 		return managed.ExternalDelete{}, err
 	}
-	o, _, err := e.ensureOwned(ctx, cr, id)
+	o, got, err := e.ensureOwned(ctx, cr, id)
 	if err != nil {
 		return managed.ExternalDelete{}, err
 	}
 	if o != ownedClient {
 		// Never delete a client this resource did not create.
 		if cr.Status.Ownership != nil && cr.Status.Ownership.Pending {
+			if got == nil {
+				return managed.ExternalDelete{}, e.settleAbsentCreation(ctx, cr)
+			}
 			return managed.ExternalDelete{}, errCreationPending
 		}
 		return managed.ExternalDelete{}, nil

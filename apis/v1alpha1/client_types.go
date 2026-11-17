@@ -197,7 +197,8 @@ type ClientOwnership struct {
 	// +optional
 	CreationNameHash string `json:"creationNameHash,omitempty"`
 
-	// CreatedAt is when the provider began creating the client.
+	// CreatedAt is when the provider last attempted POST while Pending.
+	// Once finalized, it is the timestamp of the successful creation attempt.
 	CreatedAt metav1.Time `json:"createdAt"`
 
 	// SecretFingerprint binds the record to the client's secret: the hex

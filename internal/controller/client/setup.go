@@ -6,8 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/controller"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
@@ -21,11 +23,18 @@ import (
 	"github.com/fluencelabs/rauthy-go"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	kube "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/fluencelabs/crossplane-provider-rauthy/apis/v1alpha1"
 )
+
+// rauthyHTTPTimeout is also the request budget used when settling pending creates.
+const rauthyHTTPTimeout = 30 * time.Second
+
+// Allow another request budget for Rauthy's queue after a caller times out.
+const creationQueueAllowance = rauthyHTTPTimeout
 
 var errNoProviderConfig = errors.New("no providerConfigRef set")
 
@@ -122,6 +131,8 @@ type Connector struct {
 	// Logger receives what only the provider's operator may see, such as
 	// which Client holds a record that blocks another one. Nil discards it.
 	Logger logging.Logger
+	// Clock supplies creation timestamps and pending request expiry. Nil uses real time.
+	Clock clock.PassiveClock
 
 	// crd is shared by every external client of this connector: once the
 	// installed CRD is found to prune status.ownership, no further client is
@@ -166,7 +177,11 @@ func (c *Connector) Connect(
 
 	api, err := rauthy.New(pc.Spec.URL, strings.TrimSpace(string(key)),
 		// Reconcile retries must confirm ownership before every write.
-		rauthy.WithRetryPolicy(1, 0, 0))
+		rauthy.WithRetryPolicy(1, 0, 0),
+		rauthy.WithHTTPClient(&http.Client{
+			Timeout:       rauthyHTTPTimeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}))
 	if err != nil {
 		return nil, fmt.Errorf("cannot build the Rauthy client: %w", err)
 	}
@@ -184,6 +199,9 @@ func (c *Connector) Connect(
 		rauthy.NewSecret(strings.TrimSpace(string(key))),
 		&c.crd,
 	)
+	if c.Clock != nil {
+		e.clock = c.Clock
+	}
 	if c.Logger != nil {
 		e.log = c.Logger
 	}

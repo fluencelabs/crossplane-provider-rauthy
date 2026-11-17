@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"k8s.io/utils/clock"
+	clocktest "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/fluencelabs/crossplane-provider-rauthy/apis/v1alpha1"
@@ -27,7 +29,7 @@ func TestReconcilerDeletePendingCreation(t *testing.T) {
 	}
 }
 
-func delayedCreation(t *testing.T, confidential bool) (*harness, *fakeRauthy, func()) {
+func delayedCreation(t *testing.T, confidential bool, clk clock.PassiveClock) (*harness, *fakeRauthy, func()) {
 	t.Helper()
 	f := newFakeRauthy(t)
 	started, release, committed := make(chan struct{}), make(chan struct{}), make(chan struct{})
@@ -46,9 +48,9 @@ func delayedCreation(t *testing.T, confidential bool) (*harness, *fakeRauthy, fu
 		}
 		f.serve(w, r)
 	})
-	h := newHarness(t, f, newClient(func(cr *v1alpha1.Client) {
+	h := newHarnessWithClock(t, f, newClient(func(cr *v1alpha1.Client) {
 		cr.Spec.ForProvider.Confidential = confidential
-	}))
+	}), clk)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
@@ -83,7 +85,8 @@ func delayedCreation(t *testing.T, confidential bool) (*harness, *fakeRauthy, fu
 
 func testDeletePendingCreation(t *testing.T, confidential, replacement bool) {
 	t.Helper()
-	h, f, commit := delayedCreation(t, confidential)
+	clk := clocktest.NewFakeClock(time.Now().UTC().Truncate(time.Second))
+	h, f, commit := delayedCreation(t, confidential, clk)
 	got := h.reconcile(t, 0)
 	proof := got.Status.Ownership.DeepCopy()
 	h.ageCreate(t)
@@ -91,6 +94,7 @@ func testDeletePendingCreation(t *testing.T, confidential, replacement bool) {
 	if err := h.kube.Delete(context.Background(), got); err != nil {
 		t.Fatal(err)
 	}
+	clk.Step(59 * time.Second)
 	got = h.reconcile(t, 4)
 	if got == nil || len(got.Finalizers) == 0 {
 		t.Fatal("Client finalized while POST could still commit")
@@ -117,6 +121,7 @@ func testDeletePendingCreation(t *testing.T, confidential, replacement bool) {
 		f.failDelete = false
 		f.mu.Unlock()
 	}
+	clk.Step(2 * time.Second)
 	f.resetCalls()
 	if got = h.reconcile(t, 4); got != nil {
 		t.Fatalf("Client not finalized after resolving POST: %+v", got.Status)
