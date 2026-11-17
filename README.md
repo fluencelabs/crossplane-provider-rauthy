@@ -45,22 +45,26 @@ v2: managed resources are namespaced, so a composite resource can compose a
 
 ### Clean up an orphaned client
 
-Use the Rauthy instance associated with the `Client`. Look up the id from
-`status.ownership.clientID` or the `crossplane.io/external-name` annotation.
-If they differ, inspect both. A pending create uses a temporary Rauthy display
-name starting with `crossplane-`. If `status.ownership.creationNameHash` is
-available, compare it with the hash of the full display name returned by Rauthy:
+For a terminating `Client`, stop the provider controller before starting.
+Until the provider upgrades to a rauthy-go release that checks the error
+body, the controller treats a route HTTP 404 as client absence and can
+finalize deletion. Keep it stopped until you have verified the Rauthy
+response and finished cleanup.
+
+Capture the `Client` once. Use this snapshot for the ownership checks and
+the finalizer patch. If the object is already gone, use a saved ownership
+snapshot and skip the patch:
 
 ```sh
-printf 'rauthy-creation-name-v1\0%s' "${RAUTHY_CLIENT_NAME}" | sha256sum
+client=$(kubectl -n "${NAMESPACE}" get clients.rauthy.fluence.dev "${CLIENT_NAME}" -o json)
 ```
 
-Do not delete a client that belongs to another resource.
-
-After confirming the orphan, set `RAUTHY_URL` to `spec.url` from the
-`ClusterProviderConfig` referenced by the `Client`. Set `CLIENT_ID` to the
-confirmed id and load a key with `Clients: delete` into `RAUTHY_API_KEY` with
-shell tracing disabled. Use the same API root as the provider:
+Use the Rauthy instance identified by `status.ownership.backend` in that
+snapshot. For the candidate URL, start with the referenced
+`ClusterProviderConfig.spec.url`. Set `RAUTHY_URL` to its scheme, host
+(including any port) and escaped path, omitting userinfo. Keep the host
+spelling, port and path. The commands normalize the API root and print its
+hash followed by the recorded hash. Proceed only if they match:
 
 ```sh
 api_url=$RAUTHY_URL
@@ -69,31 +73,66 @@ case "$api_url" in
   */auth/v1) ;;
   *) api_url="$api_url/auth/v1" ;;
 esac
-client_url="$api_url/clients/${CLIENT_ID}"
-printf 'Authorization: API-Key %s\n' "$RAUTHY_API_KEY" |
-  curl --fail-with-body --request DELETE --header @- "$client_url"
+backend_hash=$(printf 'rauthy-backend-v1\0%s' "$api_url" | sha256sum)
+printf 'sha256:%s\n' "${backend_hash%% *}"
+printf '%s\n' "$client" | jq -r '.status.ownership.backend'
 ```
 
-Let the controller finish deletion. If the Kubernetes `Client` remains
-`Terminating`, wait for the pending request window to elapse. Load a key with
-`Clients: read` into `RAUTHY_API_KEY` and GET the same URL:
+If the current URL does not match, recover the original URL from configuration
+history, verify its hash, and use credentials for that instance. If the binding
+is missing, or the matching instance or route cannot be verified and reached,
+leave the finalizers in place. A 404 from the current URL is irrelevant if its
+hash does not match.
+
+Look up the id from `status.ownership.clientID` or the
+`crossplane.io/external-name` annotation. If they differ, inspect both on the
+bound instance and use ownership evidence to identify which id belonged to
+this resource. Leave any client owned by another resource alone. For a pending
+create, compare `status.ownership.creationNameHash`, if present, with the hash
+of the full Rauthy display name:
+
+```sh
+printf 'rauthy-creation-name-v1\0%s' "${RAUTHY_CLIENT_NAME}" | sha256sum
+```
+
+Wait more than 60 seconds after the last possible create request before
+confirming absence. If its timing is unclear, wait after the controller stops.
+If the orphan still exists and you confirmed its ownership, set `CLIENT_ID`
+to its id and load a key with `Clients: delete` into `RAUTHY_API_KEY` with
+shell tracing disabled. Delete it on the verified API root:
+
+```sh
+client_url="$api_url/clients/${CLIENT_ID}"
+printf 'Authorization: API-Key %s\n' "$RAUTHY_API_KEY" |
+  curl --path-as-is --fail-with-body --request DELETE --header @- "$client_url"
+```
+
+With `CLIENT_ID` set to the confirmed id, load a key with `Clients: read` into
+`RAUTHY_API_KEY` and GET the same URL, even if the client was already absent:
 
 ```sh
 printf 'Authorization: API-Key %s\n' "$RAUTHY_API_KEY" |
-  curl --silent --show-error --include --header @- "$client_url"
+  curl --path-as-is --silent --show-error --include --header @- "$api_url/clients/${CLIENT_ID}"
 ```
 
 Require HTTP 404 with a Rauthy JSON error body containing
 `"error": "NotFound"` and a database no-row message. A route or proxy 404,
-including an empty or HTML body, does not confirm absence. If the ids differ,
-use ownership evidence to identify which id belonged to this resource. Leave
-any client owned by another resource alone. Remove finalizers only after
-confirming the client for this resource is absent:
+including an empty or HTML body, does not confirm absence. If the snapshot
+has a `metadata.deletionTimestamp`, remove the finalizers only after this
+manual check. Use the same snapshot as a precondition:
 
 ```sh
-kubectl -n "${NAMESPACE}" patch clients.rauthy.fluence.dev "${CLIENT_NAME}" \
-  --type=merge --patch '{"metadata":{"finalizers":[]}}'
+patch=$(printf '%s\n' "$client" | jq -ce '[
+  {op: "test", path: "/metadata/uid", value: .metadata.uid},
+  {op: "test", path: "/metadata/resourceVersion", value: .metadata.resourceVersion},
+  {op: "remove", path: "/metadata/finalizers"}
+]') &&
+  kubectl -n "${NAMESPACE}" patch clients.rauthy.fluence.dev "${CLIENT_NAME}" \
+    --type=json --patch "$patch"
 ```
+
+If a precondition fails, fetch the object again and repeat the ownership and
+absence checks before retrying. Resume the controller after cleanup succeeds.
 
 ## Resources
 
