@@ -74,17 +74,25 @@ func checkOwnedPublicWithoutS256(t *testing.T, mod func(*v1alpha1.Client)) {
 
 func TestReconcilerPublicWithoutS256IsNotCreated(t *testing.T) {
 	t.Parallel()
-	f := newFakeRauthy(t)
-	h := newHarness(t, f, newClient(public, challenges()))
+	for name, mod := range map[string]func(*v1alpha1.Client){
+		"empty": challenges(),
+		"plain": challenges("plain"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeRauthy(t)
+			h := newHarness(t, f, newClient(public, mod))
 
-	got := h.reconcile(t, 3)
+			got := h.reconcile(t, 3)
 
-	checkRefusedPKCE(t, got)
-	if f.stored() != nil {
-		t.Error("a Rauthy client was created")
-	}
-	if got.Status.Ownership != nil {
-		t.Errorf("status.ownership = %+v, want none", got.Status.Ownership)
+			checkRefusedPKCE(t, got)
+			if f.stored() != nil {
+				t.Error("a Rauthy client was created")
+			}
+			if got.Status.Ownership != nil {
+				t.Errorf("status.ownership = %+v, want none", got.Status.Ownership)
+			}
+		})
 	}
 }
 
@@ -145,6 +153,7 @@ func TestReconcilerPKCEAllowedAndRepair(t *testing.T) {
 		{"public observed S256", false, []string{"S256"}, nil},
 		{"public explicit repair", false, []string{}, []string{"S256", "plain"}},
 		{"confidential empty", true, []string{}, []string{}},
+		{"confidential plain", true, []string{"plain"}, []string{"plain"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
