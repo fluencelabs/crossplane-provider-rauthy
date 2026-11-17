@@ -272,16 +272,16 @@ func (e *external) ensureOwned(
 	ctx context.Context,
 	cr *v1alpha1.Client,
 	id string,
-) (owner, *rauthy.ClientResponse, error) {
+) (owner, *rauthy.ClientResponse, time.Time, error) {
 	if err := e.checkBackend(ctx, cr); err != nil {
-		return notOwned, nil, err
+		return notOwned, nil, time.Time{}, err
 	}
-	got, err := e.lookup(ctx, id)
+	got, notFoundAt, err := e.lookup(ctx, id)
 	if err != nil || got == nil {
-		return notOwned, nil, err
+		return notOwned, nil, notFoundAt, err
 	}
 	o, _, err := e.verifyOwner(ctx, cr, id, got)
-	return o, got, err
+	return o, got, time.Time{}, err
 }
 
 // patchOwnership writes the marker (nil clears it) and reports what the API
@@ -453,7 +453,7 @@ func (e *external) finishCreation(
 		secret = s.Secret
 		want.SecretFingerprint = secretFingerprint(rec.ClientID, *secret)
 		// A replacement during the secret read must not be bound as ours.
-		current, err := e.lookup(ctx, rec.ClientID)
+		current, _, err := e.lookup(ctx, rec.ClientID)
 		if err != nil {
 			return notOwned, nil, err
 		}

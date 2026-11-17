@@ -15,6 +15,7 @@ v2: managed resources are namespaced, so a composite resource can compose a
 ## Known limits
 
 - Deleting a `Client` with pending creation waits for the controller HTTP timeout plus allowance ([setup.go](internal/controller/client/setup.go)). A POST stalled longer in Rauthy can commit after deletion and leave an orphan requiring manual deletion in Rauthy. Rauthy has no commit deadline, and waiting forever would leave the resource `Terminating`.
+- When an earlier POST commits late and a retry reuses its proof, `status.ownership.createdAt` can show the retry time.
 - Rauthy has no conditional writes. A client can change during the single-request
   window between the provider's ownership check and its update or delete.
 - For public clients recreated outside Kubernetes, see the policy under

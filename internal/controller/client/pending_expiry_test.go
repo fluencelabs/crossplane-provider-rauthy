@@ -2,7 +2,10 @@ package client_test
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -123,5 +126,47 @@ func TestPendingRetryRequiresDurableTimestamp(t *testing.T) {
 	}
 	if slices.Contains(f.callLog(), "POST /clients") {
 		t.Fatal("POST sent without a durably refreshed timestamp")
+	}
+}
+
+func TestDeletePendingCreationUsesHTTPTimeout(t *testing.T) {
+	t.Parallel()
+	f := newFakeRauthy(t)
+	f.failPost = true
+	var stall atomic.Bool
+	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if stall.Load() && r.Method == http.MethodGet && r.URL.Path == "/auth/v1/clients/app" {
+			<-r.Context().Done()
+			return
+		}
+		f.serve(w, r)
+	})
+	clk := clocktest.NewFakeClock(time.Now().UTC().Truncate(time.Second))
+	h := newHarnessWithClock(t, f, newClient(), clk)
+	cr := h.reconcile(t, 1)
+	if cr.Status.Ownership == nil || !cr.Status.Ownership.Pending {
+		t.Fatal("failed POST did not leave pending proof")
+	}
+	c := &client.Connector{Kube: h.kube, Usage: &noopTracker{}, Clock: clk}
+	e, err := c.Connect(t.Context(), cr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Use the same 30-second request budget that the 60-second settlement window allows.
+	const requestBudget = 30 * time.Second
+	ctx, cancel := context.WithTimeout(t.Context(), requestBudget+5*time.Second)
+	defer cancel()
+	stall.Store(true)
+	started := time.Now()
+	_, err = e.Delete(ctx, cr)
+	if elapsed := time.Since(started); !errors.Is(err, context.DeadlineExceeded) ||
+		ctx.Err() != nil || elapsed < requestBudget {
+		t.Fatalf(
+			"Delete after %s: %v (parent context: %v), want the %s HTTP timeout",
+			elapsed,
+			err,
+			ctx.Err(),
+			requestBudget,
+		)
 	}
 }
