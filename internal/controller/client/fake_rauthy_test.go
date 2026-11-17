@@ -167,7 +167,7 @@ func (f *fakeRauthy) serve(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		// Not the API: something on the host probing the test port. Neither
 		// recorded nor answered as Rauthy.
-		writeError(w, http.StatusNotFound, "not the Rauthy API")
+		http.NotFound(w, r)
 		return
 	}
 	f.calls = append(f.calls, r.Method+" "+path)
@@ -180,7 +180,7 @@ func (f *fakeRauthy) serve(w http.ResponseWriter, r *http.Request) {
 	rest, isClients := strings.CutPrefix(path, "/clients")
 	switch {
 	case !isClients:
-		writeError(w, http.StatusNotFound, "no such route")
+		http.NotFound(w, r)
 	case rest == "" && r.Method == http.MethodPost:
 		f.create(w, r)
 	case strings.HasSuffix(rest, "/secret") && r.Method == http.MethodPost:
@@ -280,7 +280,7 @@ func (f *fakeRauthy) create(w http.ResponseWriter, r *http.Request) {
 func (f *fakeRauthy) byID(w http.ResponseWriter, r *http.Request, id string) {
 	c, exists := f.clients[id]
 	if !exists {
-		writeError(w, http.StatusNotFound, "client not found")
+		writeClientNotFound(w)
 		return
 	}
 	switch r.Method {
@@ -393,7 +393,7 @@ func requireArrays(raw []byte, fields ...string) string {
 func (f *fakeRauthy) secret(w http.ResponseWriter, id string) {
 	c, exists := f.clients[id]
 	if !exists {
-		writeError(w, http.StatusNotFound, "client not found")
+		writeClientNotFound(w)
 		return
 	}
 	if f.failSecret {
@@ -417,4 +417,11 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": http.StatusText(status), "message": msg})
+}
+
+// Both Rauthy 0.36.2 and 0.37.2 return this envelope for a missing client.
+func writeClientNotFound(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = io.WriteString(w, `{"timestamp":1794955166,"error":"NotFound","message":"no rows returned"}`)
 }

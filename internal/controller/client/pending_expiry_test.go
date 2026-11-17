@@ -78,7 +78,7 @@ func TestDirectDeletePendingCreationExpires(t *testing.T) {
 		if r.Method == http.MethodGet && r.URL.Path == "/auth/v1/clients/app" && delay404.Swap(false) {
 			// The lookup starts at +59s, but the 404 reaches Delete at +61s.
 			clk.Step(2 * time.Second)
-			writeError(w, http.StatusNotFound, "client not found")
+			writeClientNotFound(w)
 			return
 		}
 		f.serve(w, r)

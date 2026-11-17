@@ -223,7 +223,7 @@ func TestReconcilerDeletePendingCreationWithDelayed404(t *testing.T) {
 		clk.Step(time.Second)
 		commit()
 		clk.Step(2 * time.Second)
-		writeError(w, http.StatusNotFound, "client not found")
+		writeClientNotFound(w)
 		return true
 	})
 	got := h.reconcile(t, 0)
