@@ -69,7 +69,7 @@ var (
 
 // api is the part of the Rauthy client the controller uses.
 type api interface {
-	BaseURL() string
+	BaseURL() rauthy.Secret
 	CreateClient(ctx context.Context, req rauthy.NewClientRequest) (*rauthy.ClientResponse, error)
 	GetClient(ctx context.Context, id string) (*rauthy.ClientResponse, error)
 	UpdateClient(ctx context.Context, id string, req rauthy.UpdateClientRequest) (*rauthy.ClientResponse, error)
@@ -115,7 +115,7 @@ func NewExternal(
 	reader kube.Reader,
 	issuer string,
 ) managed.TypedExternalClient[*v1alpha1.Client] {
-	backend, err := backendIdentity(c.BaseURL())
+	backend, err := backendIdentity(c.BaseURL().Reveal())
 	if err != nil {
 		panic(err) // rauthy.New accepted this URL, so it parses.
 	}
@@ -273,7 +273,7 @@ func (e *external) clearStaleMarker(ctx context.Context, cr *v1alpha1.Client) er
 func (e *external) observeOwned(
 	cr *v1alpha1.Client,
 	got *rauthy.ClientResponse,
-	secret *string,
+	secret *rauthy.Secret,
 ) (managed.ExternalObservation, error) {
 	cr.Status.AtProvider = observation(got)
 	if meta.WasDeleted(cr) {
@@ -437,13 +437,13 @@ func (e *external) Disconnect(context.Context) error { return nil }
 
 // connectionDetails returns what a consumer needs to use the client. Only a
 // confidential client has a secret; it was read when ownership was confirmed.
-func (e *external) connectionDetails(got *rauthy.ClientResponse, secret *string) managed.ConnectionDetails {
+func (e *external) connectionDetails(got *rauthy.ClientResponse, secret *rauthy.Secret) managed.ConnectionDetails {
 	details := managed.ConnectionDetails{
 		ConnectionKeyClientID: []byte(got.ID),
 		ConnectionKeyIssuer:   []byte(e.issuer),
 	}
 	if got.Confidential && secret != nil {
-		details[ConnectionKeyClientSecret] = []byte(*secret)
+		details[ConnectionKeyClientSecret] = []byte(secret.Reveal())
 	}
 	return details
 }

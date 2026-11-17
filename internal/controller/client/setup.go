@@ -168,7 +168,7 @@ func (c *Connector) Connect(
 	if err != nil {
 		return nil, fmt.Errorf("cannot build the Rauthy client: %w", err)
 	}
-	backend, err := backendIdentity(api.BaseURL())
+	backend, err := backendIdentity(api.BaseURL().Reveal())
 	if err != nil {
 		return nil, err
 	}

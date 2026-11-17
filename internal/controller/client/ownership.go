@@ -129,7 +129,7 @@ func (e *external) verifyOwner(
 	cr *v1alpha1.Client,
 	id string,
 	got *rauthy.ClientResponse,
-) (owner, *string, error) {
+) (owner, *rauthy.Secret, error) {
 	e.confirmed = ""
 	fresh, err := e.readFresh(ctx, cr)
 	if err != nil {
@@ -384,8 +384,8 @@ func (e *external) recordOwnership(ctx context.Context, cr *v1alpha1.Client, id,
 // secretFingerprint is the binding between a record and a confidential
 // client: a domain-separated SHA-256 of the client id and the secret. It
 // cannot be reversed into the secret.
-func secretFingerprint(id, secret string) string {
-	sum := sha256.Sum256([]byte(fingerprintDomain + "\x00" + id + "\x00" + secret))
+func secretFingerprint(id string, secret rauthy.Secret) string {
+	sum := sha256.Sum256([]byte(fingerprintDomain + "\x00" + id + "\x00" + secret.Reveal()))
 	return hex.EncodeToString(sum[:])
 }
 

@@ -257,7 +257,10 @@ func TestUpdatePreservesUnsetFields(t *testing.T) {
 	server.ForceMFA = true
 	server.ClientURI = new("https://app.example.com")
 	server.Contacts = []string{"ops@example.com"}
-	server.Scim = &rauthy.ScimClientRequestResponse{BearerToken: "tok", BaseURI: "https://scim.example.com"}
+	server.Scim = &rauthy.ScimClientRequestResponse{
+		BearerToken: rauthy.NewSecret("tok"),
+		BaseURI:     "https://scim.example.com",
+	}
 	f.put(server)
 	cr := newClient(owned, func(cr *v1alpha1.Client) {
 		cr.Spec.ForProvider.Enabled = new(false)
@@ -271,7 +274,9 @@ func TestUpdatePreservesUnsetFields(t *testing.T) {
 	want := *server
 	want.Enabled = false
 	want.RedirectURIs = cr.Spec.ForProvider.RedirectURIs
-	if diff := cmp.Diff(&want, got); diff != "" {
+	if diff := cmp.Diff(&want, got, cmp.Comparer(func(a, b rauthy.Secret) bool {
+		return a.Reveal() == b.Reveal()
+	})); diff != "" {
 		t.Errorf("only enabled should change; -want, +got:\n%s", diff)
 	}
 }
