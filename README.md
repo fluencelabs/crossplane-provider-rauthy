@@ -42,14 +42,15 @@ v2: managed resources are namespaced, so a composite resource can compose a
   be saved. The next observation can mark the `Client` `Ready` if its managed
   fields match. Rauthy handles any subsequent SCIM synchronization. Check SCIM
   in Rauthy even when the `Client` is `Ready`.
-- **Proxy or gateway responses.** A proxy or gateway between the controller and Rauthy must preserve response bodies and status codes. The controller only supports responses that Rauthy itself returns.
+- **Proxy or gateway responses (S10).** Preserve Rauthy's response bodies and
+  status codes. A route HTTP 404 without a Rauthy `NotFound` JSON envelope
+  raises a reconciliation error and can leave a `Client` terminating. Check
+  routing before retrying. For client logos and favicons, rauthy-go treats an
+  empty HTTP 404 as a missing image because Rauthy uses the same response.
 
 ### Clean up an orphaned client
 
 For a terminating `Client`, stop the provider controller before starting.
-Before the provider upgrades to rauthy-go v0.3.3, the controller can treat a
-route HTTP 404 as client absence and finalize deletion. With v0.3.3, a route
-404 without a Rauthy `NotFound` error body does not count as client absence.
 Keep the controller stopped until you have verified the Rauthy response and
 finished cleanup.
 
