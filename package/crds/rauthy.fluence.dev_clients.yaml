@@ -442,6 +442,7 @@ spec:
                   clientID:
                     description: ClientID is the id of the Rauthy client this resource
                       created.
+                    minLength: 1
                     type: string
                   createdAt:
                     description: CreatedAt is when the provider created the client.

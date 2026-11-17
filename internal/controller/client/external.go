@@ -328,7 +328,11 @@ func (e *external) Create(ctx context.Context, cr *v1alpha1.Client) (managed.Ext
 	fingerprint, err := e.bindingFor(ctx, cr, id)
 	if err != nil {
 		cr.Status.Ownership = nil
-		return managed.ExternalCreation{}, e.rollback(ctx, id, err)
+		return managed.ExternalCreation{}, fmt.Errorf(
+			"created Rauthy client %q but cannot bind ownership; left unclaimed: %w",
+			id,
+			err,
+		)
 	}
 	if err = e.recordOwnership(ctx, cr, id, fingerprint); err != nil {
 		return managed.ExternalCreation{}, err

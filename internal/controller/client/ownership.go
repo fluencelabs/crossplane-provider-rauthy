@@ -106,6 +106,9 @@ func (e *external) readFresh(ctx context.Context, cr *v1alpha1.Client) (*v1alpha
 	if fresh.GetUID() != cr.GetUID() {
 		return nil, fmt.Errorf("the Client %s was replaced while being reconciled", kube.ObjectKeyFromObject(cr))
 	}
+	if ownedClientID(fresh) == "" {
+		fresh.Status.Ownership = nil
+	}
 	return fresh, nil
 }
 
@@ -378,7 +381,7 @@ func (e *external) recordOwnership(ctx context.Context, cr *v1alpha1.Client, id,
 		err = errCRDLacksOwnership
 	}
 	cr.Status.Ownership = nil
-	return e.rollback(ctx, id, err)
+	return e.rollback(ctx, id, cr.Spec.ForProvider.Confidential, fingerprint, err)
 }
 
 // secretFingerprint is the binding between a record and a confidential
@@ -392,15 +395,33 @@ func secretFingerprint(id string, secret rauthy.Secret) string {
 const fingerprintDomain = "rauthy-client-secret-v1"
 
 // rollback deletes a client whose ownership is known not to be recorded.
-func (e *external) rollback(ctx context.Context, id string, cause error) error {
+func (e *external) rollback(ctx context.Context, id string, confidential bool, fingerprint string, cause error) error {
 	ctx, cancel := detached(ctx)
 	defer cancel()
-	if err := e.api.DeleteClient(ctx, id); err != nil && !rauthy.IsNotFound(err) {
-		return fmt.Errorf(
-			"created Rauthy client %q but could not record its ownership (%w), and could not delete it again "+
-				"(%w): the resource will refuse it; delete client %q in Rauthy to retry",
-			id, cause, err, id,
-		)
+	got, err := e.lookup(ctx, id)
+	if err != nil {
+		return fmt.Errorf("cannot confirm rollback ownership of client %q (%w): %w", id, cause, err)
+	}
+	if got != nil && got.Confidential != confidential {
+		return fmt.Errorf("refusing rollback of replaced client %q: %w", id, cause)
+	}
+	if got != nil && confidential {
+		s, secretErr := e.api.GetClientSecret(ctx, id)
+		if secretErr != nil {
+			return fmt.Errorf("cannot confirm rollback secret of client %q (%w): %w", id, cause, secretErr)
+		}
+		if fingerprint == "" || s.Secret == nil || secretFingerprint(id, *s.Secret) != fingerprint {
+			return fmt.Errorf("refusing rollback of replaced client %q: %w", id, cause)
+		}
+	}
+	if got != nil {
+		if err = e.api.DeleteClient(ctx, id); err != nil && !rauthy.IsNotFound(err) {
+			return fmt.Errorf(
+				"created Rauthy client %q but could not record its ownership (%w), and could not delete it again "+
+					"(%w): the resource will refuse it; delete client %q in Rauthy to retry",
+				id, cause, err, id,
+			)
+		}
 	}
 	if errors.Is(cause, errCRDLacksOwnership) {
 		return fmt.Errorf(

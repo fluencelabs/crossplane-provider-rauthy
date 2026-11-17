@@ -172,3 +172,16 @@ func TestCRDPublicClientLegacyRatcheting(t *testing.T) {
 		})
 	}
 }
+
+func TestCRDRejectsEmptyOwnershipClientID(t *testing.T) {
+	for _, id := range []string{"", "app"} {
+		obj := forProviderObject(minimalForProvider(nil))
+		obj["status"] = map[string]any{"ownership": map[string]any{
+			"backend": "synthetic-backend", "clientID": id, "createdAt": "2026-11-17T00:00:00Z",
+		}}
+		errs := admitObject(t, obj, nil)
+		if (len(errs) != 0) != (id == "") {
+			t.Errorf("clientID %q: %v", id, errs)
+		}
+	}
+}

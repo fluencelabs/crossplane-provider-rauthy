@@ -183,6 +183,7 @@ type ClientOwnership struct {
 	Backend string `json:"backend"`
 
 	// ClientID is the id of the Rauthy client this resource created.
+	// +kubebuilder:validation:MinLength=1
 	ClientID string `json:"clientID"`
 
 	// CreatedAt is when the provider created the client.

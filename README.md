@@ -147,10 +147,11 @@ this resource's client with that id exists in Rauthy.**
 
 - **Create** (S0): the POST, then the secret is read and the record (id and
   fingerprint) is written in one status patch. If the secret cannot be read,
-  the new client is deleted again. If writing the record fails, the provider
+  the client is left unclaimed because rollback ownership cannot be proved.
+  If writing the record fails, the provider
   re-reads the `Client` without the cache: if the record landed anyway, the
-  client is kept (S2); if it did not, the new client is deleted again (back to
-  S0); if even the re-read fails, the client is neither deleted nor claimed,
+  client is kept (S2); if it did not, the provider checks the client and its
+  secret fingerprint again before deleting it (back to S0); if even the re-read fails, the client is neither deleted nor claimed,
   and the next reconcile decides from a fresh read (S2 or S1). Re-reads and
   the rollback run on their own bounded context, so an expired reconcile
   deadline does not stop them.
