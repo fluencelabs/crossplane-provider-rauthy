@@ -154,6 +154,7 @@ func TestReconcilerPKCEAllowedAndRepair(t *testing.T) {
 		{"public explicit repair", false, []string{}, []string{"S256", "plain"}},
 		{"confidential empty", true, []string{}, []string{}},
 		{"confidential plain", true, []string{"plain"}, []string{"plain"}},
+		{"confidential observed plain", true, []string{"plain"}, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
