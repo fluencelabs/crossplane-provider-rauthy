@@ -21,6 +21,11 @@ import (
 // given, and returns a harness for it that shares h's reconciler.
 func (h *harness) join(t *testing.T, cr *v1alpha1.Client, uid types.UID) *harness {
 	t.Helper()
+	pc := &v1alpha1.ClusterProviderConfig{}
+	if err := h.kube.Get(context.Background(), kube.ObjectKey{Name: "default"}, pc); err != nil {
+		t.Fatal(err)
+	}
+	bindBackend(pc.Spec.URL+"/auth/v1", cr)
 	cr.Spec.ProviderConfigReference = &xpv2.ProviderConfigReference{Kind: "ClusterProviderConfig", Name: "default"}
 	cr.Spec.WriteConnectionSecretToReference = &xpv2.LocalSecretReference{Name: "app-oidc"}
 	cr.SetUID(uid)

@@ -105,6 +105,7 @@ func TestConnect(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
+			bindBackend(f.srv.URL+"/auth/v1", tc.cr)
 			connectAndObserve(t, f, tc.reason, tc.objects, tc.cr, tc.wantErr, tc.wantIssuer)
 		})
 	}

@@ -29,7 +29,7 @@ import (
 type ClientParameters struct {
 	// Name is the human-readable name shown on the login page.
 	// +optional
-	// +kubebuilder:validation:Pattern=`^$|^[a-zA-Z0-9À-ɏ\-\s\x{3041}-\x{3096}\x{30A0}-\x{30FF}\x{3400}-\x{4DB5}\x{4E00}-\x{9FCB}\x{F900}-\x{FA6A}\x{2E80}-\x{2FD5}\x{FF66}-\x{FF9F}\x{FFA1}-\x{FFDC}\x{31F0}-\x{31FF}]{2,128}$`
+	// +kubebuilder:validation:Pattern=`^$|^(?:[a-zA-Z0-9À-ɏ\x{3041}-\x{3096}\x{30A0}-\x{30FF}\x{3400}-\x{4DB5}\x{4E00}-\x{9FCB}\x{F900}-\x{FA6A}\x{2E80}-\x{2FD5}\x{FF66}-\x{FF9F}\x{FFA1}-\x{FFDC}\x{31F0}-\x{31FF}\x{0009}-\x{000D}\x{0085}\p{Zs}\x{2028}\x{2029}()\-]{2,128}|[\p{L}\p{M}\p{N}\p{Zs}()._-]{2,128})$`
 	Name *string `json:"name,omitempty"`
 
 	// Confidential clients authenticate with a secret that Rauthy generates.
@@ -58,25 +58,25 @@ type ClientParameters struct {
 	// AllowedOrigins are additional CORS origins, as scheme://host[:port]
 	// without a path.
 	// +optional
-	// +kubebuilder:validation:items:Pattern=`^(http|https)://[a-z0-9.:-]+$`
+	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z][a-zA-Z0-9+.\-]*://[a-z0-9.:-]+$`
 	// +listType=set
 	AllowedOrigins []string `json:"allowedOrigins"`
 
 	// FlowsEnabled are the enabled OAuth 2.0 grant types.
 	// +optional
 	// +kubebuilder:validation:MinItems=1
-	// +kubebuilder:validation:items:Enum=authorization_code;client_credentials;"urn:ietf:params:oauth:grant-type:device_code";password;refresh_token
+	// +kubebuilder:validation:items:Enum=authorization_code;client_credentials;"urn:ietf:params:oauth:grant-type:device_code";"urn:ietf:params:oauth:grant-type:token-exchange";password;refresh_token
 	// +listType=set
 	FlowsEnabled []string `json:"flowsEnabled,omitempty"`
 
 	// AccessTokenAlg is the signing algorithm of access tokens.
 	// +optional
-	// +kubebuilder:validation:Enum=RS256;RS384;RS512;EdDSA
+	// +kubebuilder:validation:Enum=RS256;RS384;RS512;EdDSA;Ed25519
 	AccessTokenAlg *string `json:"accessTokenAlg,omitempty"`
 
 	// IDTokenAlg is the signing algorithm of id tokens.
 	// +optional
-	// +kubebuilder:validation:Enum=RS256;RS384;RS512;EdDSA
+	// +kubebuilder:validation:Enum=RS256;RS384;RS512;EdDSA;Ed25519
 	IDTokenAlg *string `json:"idTokenAlg,omitempty"`
 
 	// AuthCodeLifetime is the lifetime of an authorization code in seconds.
@@ -123,7 +123,7 @@ type ClientParameters struct {
 
 	// Contacts of the application's maintainers.
 	// +optional
-	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9+.@/-]{0,48}$`
+	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9+.@/:-]{0,48}$`
 	// +listType=set
 	Contacts []string `json:"contacts"`
 
@@ -136,7 +136,7 @@ type ClientParameters struct {
 	// RestrictGroupPrefix restricts logins to users in groups starting with
 	// this prefix.
 	// +optional
-	// +kubebuilder:validation:Pattern=`^$|^[a-zA-Z0-9-_/,:*\s]{2,64}$`
+	// +kubebuilder:validation:Pattern=`^$|^[a-zA-Z0-9-_/,:*\x{0009}-\x{000D}\x{0085}\p{Zs}\x{2028}\x{2029}]{2,64}$`
 	RestrictGroupPrefix *string `json:"restrictGroupPrefix,omitempty"`
 }
 
@@ -176,6 +176,10 @@ type ClientSpec struct {
 // writes it through the status subresource right after Rauthy accepted the
 // create, and treats it as the only evidence that the client is its own.
 type ClientOwnership struct {
+	// BackendURL is the API root of the Rauthy instance that created the client.
+	// Changing the provider config must never transfer ownership to another instance.
+	BackendURL string `json:"backendURL"`
+
 	// ClientID is the id of the Rauthy client this resource created.
 	ClientID string `json:"clientID"`
 

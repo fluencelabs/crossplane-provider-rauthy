@@ -290,16 +290,16 @@ func (f *fakeRauthy) update(w http.ResponseWriter, r *http.Request, id string) {
 	f.lastPut = &req
 	f.lastPutRaw = raw
 	// Like Rauthy, refuse null for the scope lists and store the default
-	// scope for an empty one.
+	// scope unless the stored CSV already contains openid.
 	if msg := requireArrays(raw, "scopes", "default_scopes"); msg != "" {
 		writeError(w, http.StatusBadRequest, msg)
 		return
 	}
-	if len(req.Scopes) == 0 {
-		req.Scopes = []string{"openid"}
+	if !strings.Contains(strings.Join(req.Scopes, ","), "openid") {
+		req.Scopes = append([]string{"openid"}, req.Scopes...)
 	}
-	if len(req.DefaultScopes) == 0 {
-		req.DefaultScopes = []string{"openid"}
+	if !strings.Contains(strings.Join(req.DefaultScopes, ","), "openid") {
+		req.DefaultScopes = append([]string{"openid"}, req.DefaultScopes...)
 	}
 	// Rauthy refuses a PUT without these; an empty value means the caller
 	// forgot to fill an unset field from the observed client.

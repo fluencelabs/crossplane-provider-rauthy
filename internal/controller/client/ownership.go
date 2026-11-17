@@ -10,6 +10,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	"github.com/fluencelabs/rauthy-go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,8 +30,8 @@ import (
 // fingerprint of the secret Rauthy issued when this resource created it; see
 // secretFingerprint. A client with the same id but another secret (recreated
 // by somebody else, or its secret rotated outside this provider) is not the
-// one the record names. A public client has no secret, so its binding is the
-// id alone.
+// one the record names. Every record is bound to the Rauthy API root; a public
+// client has no secret, so its binding is the backend URL and id.
 //
 // Invariant: M names a client id only while this resource's client (C) with
 // that id exists in Rauthy. Every write of M is confirmed by an uncached read
@@ -139,6 +140,9 @@ func (e *external) verifyOwner(
 		return notOwned, nil, err
 	}
 	rec := fresh.Status.Ownership
+	if rec != nil && rec.BackendURL != e.backendURL {
+		return notOwned, nil, errBackendChanged
+	}
 	if rec == nil {
 		return notOwned, nil, nil
 	}
@@ -147,7 +151,7 @@ func (e *external) verifyOwner(
 		return notOwned, nil, err
 	}
 	if !got.Confidential {
-		// A public client has no secret: the binding is the id alone. A
+		// A public client has no secret: the binding is the backend URL and id. A
 		// fingerprint means the client was confidential when recorded.
 		if rec.SecretFingerprint != "" {
 			return otherClient, nil, nil
@@ -191,8 +195,8 @@ func IndexClientID(o kube.Object) []string {
 }
 
 // recordedElsewhere reports whether another Client, in any namespace, records
-// id in its status.ownership. Client ids are global in Rauthy while Clients
-// are namespaced, and a public client's record is bound by the id alone: a
+// id and backend URL in its status.ownership. Client ids are global within a Rauthy instance while Clients
+// are namespaced, and a public client's record is bound by the URL and id: a
 // record held by two objects cannot tell which of them created the client, so
 // neither may act as its owner, and no Client may create an id another one
 // records.
@@ -208,7 +212,7 @@ func (e *external) recordedElsewhere(ctx context.Context, cr *v1alpha1.Client, i
 		return false, fmt.Errorf("cannot confirm ownership of client %q: cannot list Clients without the cache: %w",
 			id, err)
 	}
-	return e.refusedFor(cr, otherRecord(all.Items, cr, id), id), nil
+	return e.refusedFor(cr, otherRecord(all.Items, cr, id, e.backendURL), id), nil
 }
 
 // recordedElsewhereCached is recordedElsewhere answered from the cache,
@@ -226,7 +230,7 @@ func (e *external) recordedElsewhereCached(ctx context.Context, cr *v1alpha1.Cli
 	if err := e.cache.List(ctx, same, kube.MatchingFields{ClientIDIndex: id}); err != nil {
 		return false, fmt.Errorf("cannot confirm ownership of client %q: cannot look up other records: %w", id, err)
 	}
-	return e.refusedFor(cr, otherRecord(same.Items, cr, id), id), nil
+	return e.refusedFor(cr, otherRecord(same.Items, cr, id, e.backendURL), id), nil
 }
 
 // refusedFor reports whether other blocks cr and, if so, names other in the
@@ -246,9 +250,10 @@ func (e *external) refusedFor(cr, other *v1alpha1.Client, id string) bool {
 }
 
 // otherRecord returns a Client among items, other than cr, that records id.
-func otherRecord(items []v1alpha1.Client, cr *v1alpha1.Client, id string) *v1alpha1.Client {
+func otherRecord(items []v1alpha1.Client, cr *v1alpha1.Client, id, backendURL string) *v1alpha1.Client {
 	for i := range items {
-		if other := &items[i]; other.GetUID() != cr.GetUID() && ownedClientID(other) == id {
+		if other := &items[i]; other.GetUID() != cr.GetUID() && ownedClientID(other) == id &&
+			other.Status.Ownership.BackendURL == backendURL {
 			return other
 		}
 	}
@@ -259,6 +264,9 @@ func otherRecord(items []v1alpha1.Client, cr *v1alpha1.Client, id string) *v1alp
 // already made in this reconcile. A client that no longer exists is not
 // owned: there is nothing to act on.
 func (e *external) ensureOwned(ctx context.Context, cr *v1alpha1.Client, id string) (owner, error) {
+	if err := e.checkBackend(ctx, cr); err != nil {
+		return notOwned, err
+	}
 	if id != "" && e.confirmed == id {
 		return ownedClient, nil
 	}
@@ -314,7 +322,8 @@ func (e *external) patchOwnership(
 
 // sameRecord reports whether the stored record is the one that was written.
 func sameRecord(stored, want *v1alpha1.ClientOwnership) bool {
-	return stored != nil && stored.ClientID == want.ClientID && stored.SecretFingerprint == want.SecretFingerprint
+	return stored != nil && stored.ClientID == want.ClientID && stored.BackendURL == want.BackendURL &&
+		stored.SecretFingerprint == want.SecretFingerprint
 }
 
 // clearOwnership removes the marker and returns nil only once the API server
@@ -345,6 +354,7 @@ func (e *external) recordOwnership(ctx context.Context, cr *v1alpha1.Client, id,
 	}
 	marker := &v1alpha1.ClientOwnership{
 		ClientID:          id,
+		BackendURL:        e.backendURL,
 		CreatedAt:         metav1.NewTime(time.Now()),
 		SecretFingerprint: fingerprint,
 	}
@@ -473,4 +483,18 @@ func outcomeUnknownError(id string, postErr error) error {
 			"verify and delete it in Rauthy to retry: %w (%w)",
 		id, ErrAdoption, postErr,
 	)
+}
+
+// checkBackend refuses a switch even when the destination has no client.
+// Status is read uncached so a stale object cannot discard the original binding.
+func (e *external) checkBackend(ctx context.Context, cr *v1alpha1.Client) error {
+	fresh, err := e.readFresh(ctx, cr)
+	if err != nil {
+		return err
+	}
+	cr.Status.Ownership = fresh.Status.Ownership
+	if rec := cr.Status.Ownership; rec != nil && rec.BackendURL != e.backendURL {
+		return errBackendChanged
+	}
+	return checkRecordID(cr, meta.GetExternalName(cr))
 }

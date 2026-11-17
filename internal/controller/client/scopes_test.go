@@ -73,6 +73,14 @@ func TestUpdateSendsScopesAsArrays(t *testing.T) {
 			wantScopes:  []string{"openid", "email"},
 			wantDefault: []string{"openid"},
 		},
+		"spec omits openid": {
+			spec: func(p *v1alpha1.ClientParameters) {
+				p.Scopes = []string{"email"}
+				p.DefaultScopes = []string{"profile"}
+			},
+			wantScopes:  []string{"openid", "email"},
+			wantDefault: []string{"openid", "profile"},
+		},
 		"spec sets them": {
 			spec: func(p *v1alpha1.ClientParameters) {
 				p.Scopes = []string{"openid", "profile"}

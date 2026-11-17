@@ -81,7 +81,7 @@ func checkNoStaleWrite(
 	if setup != nil {
 		setup(f)
 	}
-	k := newKube(t, want)
+	k := newKube(t, f, want)
 	e := client.NewExternal(f.api(t), k.Status(), k, testIssuer)
 
 	// The reconciler's read.

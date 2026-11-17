@@ -114,3 +114,33 @@ func TestFakeCreateRequiresRedirectArray(t *testing.T) {
 		})
 	}
 }
+
+func TestObserveForceMFADrift(t *testing.T) {
+	t.Parallel()
+	for _, desired := range []bool{true, false} {
+		t.Run(map[bool]string{true: "enable", false: "disable"}[desired], func(t *testing.T) {
+			t.Parallel()
+			f := newFakeRauthy(t)
+			server := existing(true)
+			server.ForceMFA = !desired
+			f.put(server)
+			cr := newClient(owned, func(cr *v1alpha1.Client) { cr.Spec.ForProvider.ForceMFA = new(desired) })
+			e := newExternal(t, f, cr)
+			obs, err := e.Observe(context.Background(), cr)
+			if err != nil || obs.ResourceUpToDate || obs.Diff != "fields differ from the spec: forceMfa" ||
+				readyStatus(cr) != "False" {
+				t.Fatalf("Observe = %+v, %v, Ready=%s", obs, err, readyStatus(cr))
+			}
+			if _, err = e.Update(context.Background(), cr); err != nil {
+				t.Fatal(err)
+			}
+			if f.stored().ForceMFA != desired {
+				t.Fatal("forceMfa was not updated")
+			}
+			obs, err = e.Observe(context.Background(), cr)
+			if err != nil || !obs.ResourceUpToDate || readyStatus(cr) != "True" {
+				t.Fatalf("Observe after update = %+v, %v", obs, err)
+			}
+		})
+	}
+}

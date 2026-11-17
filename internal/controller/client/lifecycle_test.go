@@ -157,7 +157,7 @@ func TestCreate(t *testing.T) {
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			base, k, reader := createClients(t, tc.cr, tc.intercept, tc.readerFails, tc.cancelOnPatch, cancel)
+			base, k, reader := createClients(t, f, tc.cr, tc.intercept, tc.readerFails, tc.cancelOnPatch, cancel)
 			e := client.NewExternal(f.api(t), k.Status(), reader, testIssuer)
 
 			_, err := e.Create(ctx, tc.cr)
@@ -417,13 +417,14 @@ func inMemoryOwnership(cr *v1alpha1.Client) string {
 // go through and the uncached reader, with the failures a case asks for.
 func createClients(
 	t *testing.T,
+	f *fakeRauthy,
 	cr *v1alpha1.Client,
 	intercept *interceptor.Funcs,
 	readerFails, cancelOnPatch bool,
 	cancel context.CancelFunc,
 ) (kube.Client, kube.Client, kube.Reader) {
 	t.Helper()
-	base := newKube(t, cr)
+	base := newKube(t, f, cr)
 	k := base
 	switch {
 	case cancelOnPatch:
@@ -440,8 +441,13 @@ func createClients(
 	}
 	var reader kube.Reader = base
 	if readerFails {
+		initialRead := true
 		reader = interceptor.NewClient(base.(kube.WithWatch), interceptor.Funcs{
-			Get: func(context.Context, kube.WithWatch, kube.ObjectKey, kube.Object, ...kube.GetOption) error {
+			Get: func(ctx context.Context, c kube.WithWatch, key kube.ObjectKey, obj kube.Object, opts ...kube.GetOption) error {
+				if initialRead {
+					initialRead = false
+					return c.Get(ctx, key, obj, opts...)
+				}
 				return errors.New("API server unreachable")
 			},
 		})
@@ -457,7 +463,7 @@ func TestCreateRecordsBinding(t *testing.T) {
 		t.Parallel()
 		f := newFakeRauthy(t)
 		cr := newClient()
-		k := newKube(t, cr)
+		k := newKube(t, f, cr)
 		if _, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Create(ctx, cr); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -478,7 +484,7 @@ func TestCreateRecordsBinding(t *testing.T) {
 		t.Parallel()
 		f := newFakeRauthy(t)
 		cr := newClient(public)
-		k := newKube(t, cr)
+		k := newKube(t, f, cr)
 		if _, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Create(ctx, cr); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -499,7 +505,7 @@ func TestUpdateRefusesConfidentialFlip(t *testing.T) {
 	ownership := cr.Status.Ownership
 	cr.Spec.ForProvider.Confidential = false
 	cr.Status.Ownership = ownership
-	k := newKube(t, cr)
+	k := newKube(t, f, cr)
 
 	_, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Update(context.Background(), cr)
 
@@ -509,5 +515,49 @@ func TestUpdateRefusesConfidentialFlip(t *testing.T) {
 		if strings.HasPrefix(c, "PUT") {
 			t.Errorf("confidentiality change reached Rauthy: %s", c)
 		}
+	}
+}
+
+func TestFailedDeleteRetainsOwnership(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newFakeRauthy(t)
+	f.put(existing(true))
+	f.failDelete = true
+	cr := newClient(owned, deleting)
+	k := newKube(t, f, cr)
+	e := client.NewExternal(f.api(t), k.Status(), k, testIssuer)
+	if err := k.Get(ctx, kube.ObjectKeyFromObject(cr), cr); err != nil {
+		t.Fatal(err)
+	}
+	before := cr.Status.Ownership
+	if _, err := e.Delete(ctx, cr); err == nil {
+		t.Fatal("failed DELETE returned no error")
+	}
+	stored := &v1alpha1.Client{}
+	if err := k.Get(ctx, kube.ObjectKeyFromObject(cr), stored); err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff(before, stored.Status.Ownership); diff != "" {
+		t.Fatalf("stored ownership changed: %s", diff)
+	}
+	if diff := cmp.Diff(before, cr.Status.Ownership); diff != "" {
+		t.Fatalf("in-memory ownership changed: %s", diff)
+	}
+	if f.stored() == nil {
+		t.Fatal("failed DELETE removed remote client")
+	}
+	obs, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Observe(ctx, stored)
+	if err != nil || !obs.ResourceExists {
+		t.Fatalf("deletion no longer retries: %+v, %v", obs, err)
+	}
+	f.mu.Lock()
+	f.failDelete = false
+	f.mu.Unlock()
+	if _, err = client.NewExternal(f.api(t), k.Status(), k, testIssuer).Delete(ctx, stored); err != nil {
+		t.Fatal(err)
+	}
+	if f.stored() != nil || storedOwnership(t, k, cr) != "" {
+		t.Fatal("retry failed to delete client and clear ownership")
 	}
 }

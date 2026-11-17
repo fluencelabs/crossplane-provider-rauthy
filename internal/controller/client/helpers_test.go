@@ -90,7 +90,7 @@ func forged(cr *v1alpha1.Client) {
 
 // newKube returns a fake API server holding the given Clients, with the
 // status subresource enabled as on a real cluster.
-func newKube(t *testing.T, objs ...*v1alpha1.Client) kube.Client {
+func newKube(t *testing.T, f *fakeRauthy, objs ...*v1alpha1.Client) kube.Client {
 	t.Helper()
 	s := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(s); err != nil {
@@ -101,6 +101,7 @@ func newKube(t *testing.T, objs ...*v1alpha1.Client) kube.Client {
 	}
 	b := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&v1alpha1.Client{})
 	for _, o := range objs {
+		bindBackend(f.srv.URL+"/auth/v1", o)
 		b = b.WithObjects(o.DeepCopy())
 	}
 	return b.Build()
@@ -110,7 +111,7 @@ func newKube(t *testing.T, objs ...*v1alpha1.Client) kube.Client {
 // status to a fake API server that holds cr.
 func newExternal(t *testing.T, f *fakeRauthy, cr *v1alpha1.Client) managed.TypedExternalClient[*v1alpha1.Client] {
 	t.Helper()
-	k := newKube(t, cr)
+	k := newKube(t, f, cr)
 	return client.NewExternal(f.api(t), k.Status(), k, testIssuer)
 }
 
@@ -142,4 +143,11 @@ func runtimeCreate(t *testing.T, e managed.TypedExternalClient[*v1alpha1.Client]
 
 func readyStatus(cr *v1alpha1.Client) string {
 	return string(cr.GetCondition(xpv2.TypeReady).Status)
+}
+
+// bindBackend supplies the instance binding of pre-existing ownership fixtures.
+func bindBackend(url string, cr *v1alpha1.Client) {
+	if cr.Status.Ownership != nil && cr.Status.Ownership.BackendURL == "" {
+		cr.Status.Ownership.BackendURL = url
+	}
 }
