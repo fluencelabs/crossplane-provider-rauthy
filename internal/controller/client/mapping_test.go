@@ -98,3 +98,27 @@ func TestBackendIdentityPublishesNoURL(t *testing.T) {
 		}
 	}
 }
+
+func TestBackendIdentityDistinguishesAPIRootPaths(t *testing.T) {
+	t.Parallel()
+	for _, paths := range [][2]string{
+		{"/a/auth/v1", "/b/auth/v1"},
+		{"/auth/v1", "/nested/auth/v1"},
+		{"/a%2Fb/auth/v1", "/a/b/auth/v1"},
+	} {
+		t.Run(paths[0]+" vs "+paths[1], func(t *testing.T) {
+			t.Parallel()
+			a, err := backendIdentity("https://auth.example.com" + paths[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := backendIdentity("https://auth.example.com" + paths[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if a == b {
+				t.Fatalf("different API root paths share backend identity %q", a)
+			}
+		})
+	}
+}
