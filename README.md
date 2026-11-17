@@ -459,6 +459,14 @@ both unless noted:
   by 0.36.2 only: 0.35.2 accepts them in an update, drops them and never
   reports them.
 
+One deployment of the provider on a real cluster, against Rauthy 0.35.2, was
+since observed to: reconcile a claim to `Ready`; create the client once and
+update it once, with no repeated updates; store the ownership record with a
+secret fingerprint; publish the connection secret; and keep the client `Ready`
+after that Rauthy was upgraded to 0.36.2. This is an observation from that
+deployment only; this repository's tests do not reproduce it (the envtest
+suite also uses the in-memory fake Rauthy).
+
 The provider's own tests do not run against a live Rauthy: they use an
 in-memory fake that reproduces these observations.
 
@@ -484,6 +492,7 @@ Requires Go (the version in `go.mod`), Docker for images, and the
 | ----------------- | -------------------------------------------------------------------------- |
 | `make generate`   | Regenerates deepcopy methods, the crossplane-runtime method sets and the CRDs under `package/crds`. |
 | `make test`       | Unit tests with the race detector.                                          |
+| `make test.envtest` | The controller against a real kube-apiserver and etcd (see below).        |
 | `make lint`       | golangci-lint with `.golangci.yml`.                                         |
 | `make build`      | The controller binary for the local platform under `_output/bin`.           |
 | `make image`      | Controller images for `linux/amd64` and `linux/arm64`, saved as tarballs.   |
@@ -495,6 +504,18 @@ everything but the create fields, updates replace the whole client). A second
 set of tests drives crossplane-runtime's real managed reconciler against a fake
 API server, to check that ownership recorded in status survives the runtime's
 own updates of the object.
+
+`make test.envtest` runs the controller against a real kube-apiserver and etcd
+started by controller-runtime's envtest (binaries fetched by `setup-envtest`
+for the Kubernetes version pinned in the `Makefile`), with the CRDs from
+`package/crds` installed and the same fake Rauthy. It checks what a fake API
+server cannot: pruning of `null` and survival of `[]` in the optional lists,
+the CRD's admission rules, ownership recorded through the status subresource
+(and found pruned under a CRD that lacks it), the field index on
+`status.ownership.clientID` in a real cache, resourceVersion conflicts after
+the status patch, and the controller as `Setup` builds it, from create to
+delete. These tests are built only with the `envtest` tag, so `make test`
+does not need the binaries.
 
 The upstream provider template's `build` submodule is not used; the plain
 `Makefile` above covers what this provider needs.

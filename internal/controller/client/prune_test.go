@@ -13,11 +13,13 @@ import (
 )
 
 // prunedRealDecode answers a status patch the way a real API server with a
-// CRD that prunes status.ownership does, decoded the way the real typed
-// client decodes it: the answer, which has no "ownership" key, is unmarshalled
-// into the object passed in without zeroing it first. Fields absent from the
-// answer keep whatever the object held. controller-runtime's fake client
-// zeroes the object instead, which hides that difference.
+// CRD that prunes status.ownership does, decoded by a decoder that does not
+// zero its target: the answer, which has no "ownership" key, is unmarshalled
+// into the object passed in, and fields absent from the answer keep whatever
+// the object held. Neither controller-runtime's fake client nor the real
+// typed client against a real API server decodes like that (both reset the
+// target; the envtest suite shows the real one); this keeps the provider
+// correct should a decoder ever keep absent fields.
 func prunedRealDecode() interceptor.Funcs {
 	return interceptor.Funcs{SubResourcePatch: func(
 		ctx context.Context, c kube.Client, sub string, obj kube.Object, _ kube.Patch,

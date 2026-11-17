@@ -7,6 +7,11 @@
 
 version: "2"
 
+run:
+  # The tests against a real API server are built only with this tag.
+  build-tags:
+    - envtest
+
 issues:
   # Maximum count of issues with the same text.
   # Set to 0 to disable.
