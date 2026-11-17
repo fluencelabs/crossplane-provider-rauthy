@@ -227,6 +227,27 @@ func TestObserve(t *testing.T) {
 				ready: "False",
 			},
 		},
+		"BackchannelLogoutURIMissing": {
+			reason: "A backchannel logout URI the spec sets and Rauthy lacks makes the resource not up to date.",
+			cr: newClient(owned, func(cr *v1alpha1.Client) {
+				cr.Spec.ForProvider.BackchannelLogoutURI = new("https://app.example.com/backchannel")
+			}),
+			server: existing(true),
+			want: want{
+				obs: managed.ExternalObservation{
+					ResourceExists:   true,
+					ResourceUpToDate: false,
+					Diff:             "fields differ from the spec: backchannelLogoutUri",
+					ConnectionDetails: managed.ConnectionDetails{
+						client.ConnectionKeyClientID:     []byte(testID),
+						client.ConnectionKeyClientSecret: []byte(fakeSecret),
+						client.ConnectionKeyIssuer:       []byte(testIssuer),
+					},
+				},
+				calls: []string{"GET /clients/app", "POST /clients/app/secret"},
+				ready: "False",
+			},
+		},
 		"ListOrderDoesNotMatter": {
 			reason: "Lists are compared as sets: a reordered spec list is up to date.",
 			cr: newClient(owned, public, func(cr *v1alpha1.Client) {

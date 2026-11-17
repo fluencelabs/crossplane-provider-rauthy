@@ -252,6 +252,30 @@ func TestReconcilerCreateUpdateReady(t *testing.T) {
 	}
 }
 
+func TestReconcilerUpdatesIDTokenAlg(t *testing.T) {
+	t.Parallel()
+	f := newFakeRauthy(t)
+	f.put(existing(true))
+	h := newHarness(t, f, newClient(owned, func(cr *v1alpha1.Client) {
+		cr.Spec.ForProvider.IDTokenAlg = new("RS256")
+	}))
+
+	got := h.reconcile(t, 3)
+
+	if conditionStatus(got, xpv2.TypeReady) != "True" {
+		t.Errorf("Ready = %q, conditions %+v; want True", conditionStatus(got, xpv2.TypeReady), got.Status.Conditions)
+	}
+	switch b := f.lastPutBody(); {
+	case b == nil:
+		t.Error("no PUT reached Rauthy, want one carrying idTokenAlg RS256")
+	case b.IDTokenAlg != "RS256":
+		t.Errorf("idTokenAlg in the PUT body = %q, want RS256", b.IDTokenAlg)
+	}
+	if c := f.stored(); c.IDTokenAlg != "RS256" {
+		t.Errorf("idTokenAlg in Rauthy = %q, want RS256", c.IDTokenAlg)
+	}
+}
+
 func TestReconcilerFailedPutConverges(t *testing.T) {
 	t.Parallel()
 	f := newFakeRauthy(t)
