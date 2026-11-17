@@ -1,6 +1,7 @@
 package client //nolint:testpackage // Exercise the unexported issuer mapping directly.
 
 import (
+	"encoding/json"
 	"reflect"
 	"slices"
 	"strings"
@@ -280,6 +281,142 @@ func TestDifferencesNamesEachField(t *testing.T) {
 			change(&p)
 			if got := differences(&p, &obs); !slices.Equal(got, []string{field}) {
 				t.Errorf("differences = %v, want [%s]", got, field)
+			}
+		})
+	}
+}
+
+// Each optional field preserves an absent desired value, applies a populated
+// value, and handles an explicit empty value according to its field contract.
+func TestUpdateRequestOptionalStates(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		field                               string
+		observed, desired, empty, wantEmpty any
+	}{
+		{"Name", new("Stored App"), new("Spec App"), new(""), (*string)(nil)},
+		{"PostLogoutRedirectURIs", []string{"https://stored.example/out"}, []string{"https://spec.example/out"}, []string{}, []string{}},
+		{"AllowedOrigins", []string{"https://stored.example"}, []string{"https://spec.example"}, []string{}, []string{}},
+		{"FlowsEnabled", []string{"authorization_code"}, []string{"client_credentials"}, []string{}, []string{}},
+		{"AccessTokenAlg", "EdDSA", new("RS384"), new(""), ""},
+		{"IDTokenAlg", "EdDSA", new("RS512"), new(""), ""},
+		{"AuthCodeLifetime", int64(60), new(int64(120)), new(int64(0)), int64(0)},
+		{"AccessTokenLifetime", int64(1800), new(int64(900)), new(int64(0)), int64(0)},
+		{"Scopes", []string{"openid", "email"}, []string{"openid", "profile"}, []string{}, []string{"openid", "email"}},
+		{"DefaultScopes", []string{"openid", "email"}, []string{"openid", "profile"}, []string{}, []string{"openid", "email"}},
+		{"Challenges", []string{"S256"}, []string{"plain", "S256"}, []string{}, []string{}},
+		{"ClientURI", new("https://stored.example"), new("https://spec.example"), new(""), (*string)(nil)},
+		{"Contacts", []string{"stored@example.com"}, []string{"spec@example.com"}, []string{}, []string{}},
+		{"BackchannelLogoutURI", new("https://stored.example/bcl"), new("https://spec.example/bcl"), new(""), (*string)(nil)},
+		{"RestrictGroupPrefix", new("stored-"), new("spec-"), new(""), (*string)(nil)},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			t.Parallel()
+			populated := reflect.ValueOf(tc.desired)
+			if populated.Kind() == reflect.Pointer && reflect.TypeOf(tc.observed).Kind() != reflect.Pointer {
+				populated = populated.Elem()
+			}
+			for _, state := range []struct {
+				name          string
+				desired, want any
+			}{
+				{"absent", nil, tc.observed},
+				{"populated", tc.desired, populated.Interface()},
+				{"empty", tc.empty, tc.wantEmpty},
+			} {
+				t.Run(state.name, func(t *testing.T) {
+					t.Parallel()
+					var p v1alpha1.ClientParameters
+					var obs rauthy.ClientResponse
+					reflect.ValueOf(&obs).Elem().FieldByName(tc.field).Set(reflect.ValueOf(tc.observed))
+					if state.desired != nil {
+						reflect.ValueOf(&p).Elem().FieldByName(tc.field).Set(reflect.ValueOf(state.desired))
+					}
+					req := updateRequest("app", &p, &obs)
+					got := reflect.ValueOf(req).FieldByName(tc.field).Interface()
+					if !reflect.DeepEqual(got, state.want) {
+						t.Errorf("PUT %s = %v, want %v", tc.field, got, state.want)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestUpdateRequestBooleanStates(t *testing.T) {
+	t.Parallel()
+	for _, field := range []string{"Enabled", "ForceMFA"} {
+		for _, state := range []struct {
+			name     string
+			observed bool
+			desired  *bool
+			want     bool
+		}{
+			{"absent-false", false, nil, false},
+			{"absent-true", true, nil, true},
+			{"enable", false, new(true), true},
+			{"disable", true, new(false), false},
+			{"remain-enabled", true, new(true), true},
+			{"remain-disabled", false, new(false), false},
+		} {
+			t.Run(field+"/"+state.name, func(t *testing.T) {
+				t.Parallel()
+				var p v1alpha1.ClientParameters
+				var obs rauthy.ClientResponse
+				reflect.ValueOf(&obs).Elem().FieldByName(field).SetBool(state.observed)
+				reflect.ValueOf(&p).Elem().FieldByName(field).Set(reflect.ValueOf(state.desired))
+				req := updateRequest("app", &p, &obs)
+				if got := reflect.ValueOf(req).FieldByName(field).Bool(); got != state.want {
+					t.Errorf("PUT %s = %v, want %v", field, got, state.want)
+				}
+			})
+		}
+	}
+}
+
+func TestUpdateRequestRequiredFields(t *testing.T) {
+	t.Parallel()
+	for _, confidential := range []bool{false, true} {
+		for _, redirects := range [][]string{nil, {}, {"https://spec.example/cb"}} {
+			p := v1alpha1.ClientParameters{Confidential: confidential, RedirectURIs: redirects}
+			obs := fullObserved()
+			obs.Confidential = !confidential
+			req := updateRequest("desired-id", &p, &obs)
+			if req.ID != "desired-id" || !reflect.DeepEqual(req.RedirectURIs, redirects) ||
+				req.Confidential != confidential {
+				t.Errorf("PUT ID = %q, redirects = %v, confidential = %v, want desired-id, %v, %v",
+					req.ID, req.RedirectURIs, req.Confidential, redirects, confidential)
+			}
+		}
+	}
+}
+
+// Settings outside ClientParameters always retain the observed value.
+func TestUpdateRequestUnmanagedFields(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		field  string
+		values []any
+	}{
+		{"Scim", []any{(*rauthy.ScimClientRequestResponse)(nil), &rauthy.ScimClientRequestResponse{
+			BaseURI: "https://scim.example", BearerToken: rauthy.NewSecret("synthetic-token"),
+			SyncGroups: true, GroupSyncPrefix: new("team-"),
+		}}},
+		{"AllowedResources", []any{[]string(nil), []string{}, []string{"https://api.example"}}},
+		{"DefaultAud", []any{[]string(nil), []string{}, []string{"audience"}}},
+		{"Claims", []any{json.RawMessage(nil), json.RawMessage(`{}`), json.RawMessage(`{"team":"ops"}`)}},
+		{"ClaimsAtRoot", []any{false, true}},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			t.Parallel()
+			for _, want := range tc.values {
+				var obs rauthy.ClientResponse
+				reflect.ValueOf(&obs).Elem().FieldByName(tc.field).Set(reflect.ValueOf(want))
+				p := fullSpec()
+				req := updateRequest("app", &p, &obs)
+				if got := reflect.ValueOf(req).FieldByName(tc.field).Interface(); !reflect.DeepEqual(got, want) {
+					t.Errorf("PUT %s = %v, want observed %v", tc.field, got, want)
+				}
 			}
 		})
 	}
