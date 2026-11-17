@@ -14,16 +14,68 @@ v2: managed resources are namespaced, so a composite resource can compose a
 
 ## Known limits
 
-- Deleting a `Client` with pending creation waits for the controller HTTP timeout plus allowance ([setup.go](internal/controller/client/setup.go)). A POST stalled longer in Rauthy can commit after deletion and leave an orphan requiring manual deletion in Rauthy. Rauthy has no commit deadline, and waiting forever would leave the resource `Terminating`.
-- When an earlier POST commits late and a retry reuses its proof, `status.ownership.createdAt` can show the retry time.
-- Rauthy has no conditional writes. A client can change during the single-request
-  window between the provider's ownership check and its update or delete.
-- For public clients recreated outside Kubernetes, see the policy under
-  [What counts as ownership](#what-counts-as-ownership).
-- A client update can persist before SCIM synchronization fails with HTTP 500.
-  The resource can become `Ready` on the next observation if its managed fields
-  match. `Ready` does not confirm SCIM completion. SCIM recovery depends on
-  Rauthy's own subsequent synchronization, which the provider does not trigger.
+- **Public client recreated outside Crossplane.** A public client has no secret
+  to fingerprint. The controller treats a replacement with the same id on the
+  same Rauthy instance as its own and can overwrite its settings. Do not
+  recreate a managed public client outside Crossplane with the same id. Use a
+  new id when moving it to another owner.
+- **Deletion during pending creation.** When the client is absent, deletion
+  waits for a Rauthy 404 after the controller's HTTP timeout plus a queue
+  allowance ([setup.go](internal/controller/client/setup.go),
+  [pending deletion tests](internal/controller/client/pending_expiry_test.go)).
+  A POST that commits after this window can leave an orphan. If a client from
+  another object takes the same id during the window, deletion can leave that
+  client behind
+  ([same-id replacement test](internal/controller/client/delete_pending_test.go)).
+  Check ownership before using the [cleanup steps](#clean-up-an-orphaned-client).
+- **Ownership status changed outside the provider.** A corrupt ownership
+  record, such as one naming a different client id, can leave the resource
+  `Terminating`. Use the [same cleanup steps](#clean-up-an-orphaned-client).
+- **Late POST and retry.** If an earlier POST commits after a retry has reused
+  its proof, `status.ownership.createdAt` can show the retry time. Check Rauthy's
+  logs for the original request time.
+- **External changes during reconciliation.** Rauthy has no conditional writes.
+  A change in the single-request window between the ownership check and the
+  update or delete can be overwritten or removed. Coordinate changes to managed
+  clients through Crossplane.
+- **SCIM synchronization fails with HTTP 500.** The client update can already
+  be saved. The next observation can mark the `Client` `Ready` if its managed
+  fields match. Rauthy handles any subsequent SCIM synchronization. Check SCIM
+  in Rauthy even when the `Client` is `Ready`.
+
+### Clean up an orphaned client
+
+Use the Rauthy instance associated with the `Client`. Look up the id from
+`status.ownership.clientID` or the `crossplane.io/external-name` annotation.
+If they differ, inspect both. A pending create uses a temporary Rauthy display
+name starting with `crossplane-`. If `status.ownership.creationNameHash` is
+available, compare it with the hash of the full display name returned by Rauthy:
+
+```sh
+printf 'rauthy-creation-name-v1\0%s' "${RAUTHY_CLIENT_NAME}" | sha256sum
+```
+
+Do not delete a client that belongs to another resource.
+
+After confirming the orphan, set `RAUTHY_URL` to the Rauthy base URL without a
+trailing slash, supply an API key with `Clients: delete` in `RAUTHY_API_KEY`, and
+set `CLIENT_ID` to the confirmed id:
+
+```sh
+curl --fail-with-body --request DELETE \
+  --header "Authorization: API-Key ${RAUTHY_API_KEY}" \
+  "${RAUTHY_URL}/auth/v1/clients/${CLIENT_ID}"
+```
+
+Let the controller finish deletion. If the Kubernetes `Client` remains
+`Terminating`, wait for the pending request window to elapse, then GET the same
+endpoint using a key with `Clients: read`. Remove finalizers only after that
+GET returns HTTP 404. If you found two candidate ids, confirm both are absent:
+
+```sh
+kubectl -n "${NAMESPACE}" patch clients.rauthy.fluence.dev "${CLIENT_NAME}" \
+  --type=merge --patch '{"metadata":{"finalizers":[]}}'
+```
 
 ## Resources
 
@@ -431,6 +483,21 @@ update fails, the resource still owns the client and keeps retrying it. The
 matches the spec.
 
 ## Upgrading
+
+An upgrade or rollback during pending creation can leave an orphan even if the
+POST is still within the controller's HTTP timeout. Pause changes that create
+clients and let pending creations settle before upgrading or rolling back the
+provider. Run this across all namespaces and proceed only when it succeeds and
+prints no clients:
+
+```sh
+clients=$(kubectl get clients.rauthy.fluence.dev --all-namespaces -o json) &&
+  printf '%s\n' "$clients" |
+  jq -r '.items[] | select(.status.ownership.pending == true) | [.metadata.namespace, .metadata.name] | @tsv'
+```
+
+If an orphan remains after the change, follow the
+[cleanup steps](#clean-up-an-orphaned-client).
 
 From the release after v0.1.0, a spec with `scopes: []` or `defaultScopes: []`
 is refused at admission. Such a value never took effect: Rauthy replaced it
