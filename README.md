@@ -57,20 +57,38 @@ printf 'rauthy-creation-name-v1\0%s' "${RAUTHY_CLIENT_NAME}" | sha256sum
 
 Do not delete a client that belongs to another resource.
 
-After confirming the orphan, set `RAUTHY_URL` to the Rauthy base URL without a
-trailing slash, supply an API key with `Clients: delete` in `RAUTHY_API_KEY`, and
-set `CLIENT_ID` to the confirmed id:
+After confirming the orphan, set `RAUTHY_URL` to `spec.url` from the
+`ClusterProviderConfig` referenced by the `Client`. Set `CLIENT_ID` to the
+confirmed id and load a key with `Clients: delete` into `RAUTHY_API_KEY` with
+shell tracing disabled. Use the same API root as the provider:
 
 ```sh
-curl --fail-with-body --request DELETE \
-  --header "Authorization: API-Key ${RAUTHY_API_KEY}" \
-  "${RAUTHY_URL}/auth/v1/clients/${CLIENT_ID}"
+api_url=$RAUTHY_URL
+while [ "${api_url%/}" != "$api_url" ]; do api_url=${api_url%/}; done
+case "$api_url" in
+  */auth/v1) ;;
+  *) api_url="$api_url/auth/v1" ;;
+esac
+client_url="$api_url/clients/${CLIENT_ID}"
+printf 'Authorization: API-Key %s\n' "$RAUTHY_API_KEY" |
+  curl --fail-with-body --request DELETE --header @- "$client_url"
 ```
 
 Let the controller finish deletion. If the Kubernetes `Client` remains
-`Terminating`, wait for the pending request window to elapse, then GET the same
-endpoint using a key with `Clients: read`. Remove finalizers only after that
-GET returns HTTP 404. If you found two candidate ids, confirm both are absent:
+`Terminating`, wait for the pending request window to elapse. Load a key with
+`Clients: read` into `RAUTHY_API_KEY` and GET the same URL:
+
+```sh
+printf 'Authorization: API-Key %s\n' "$RAUTHY_API_KEY" |
+  curl --silent --show-error --include --header @- "$client_url"
+```
+
+Require HTTP 404 with a Rauthy JSON error body containing
+`"error": "NotFound"` and a database no-row message. A route or proxy 404,
+including an empty or HTML body, does not confirm absence. If the ids differ,
+use ownership evidence to identify which id belonged to this resource. Leave
+any client owned by another resource alone. Remove finalizers only after
+confirming the client for this resource is absent:
 
 ```sh
 kubectl -n "${NAMESPACE}" patch clients.rauthy.fluence.dev "${CLIENT_NAME}" \
@@ -484,11 +502,23 @@ matches the spec.
 
 ## Upgrading
 
-An upgrade or rollback during pending creation can leave an orphan even if the
-POST is still within the controller's HTTP timeout. Pause changes that create
-clients and let pending creations settle before upgrading or rolling back the
-provider. Run this across all namespaces and proceed only when it succeeds and
-prints no clients:
+An upgrade or rollback during creation can leave an orphan. Before either
+operation, stop submitting new `Client` resources in all namespaces and let
+pending creations settle. Then scale the provider controller Deployment to zero
+and verify its pods have stopped. Alternatively, keep submissions stopped and
+set `crossplane.io/paused: "true"` on every `Client` across all namespaces.
+Wait for each to report `Synced=False` with reason `ReconcilePaused` before
+proceeding. Use the scale-to-zero procedure if the running version cannot
+confirm the pause.
+
+Once reconciliation is stopped, wait more than 60 seconds (the 30-second
+request timeout plus 30 seconds for the queue). This gives in-flight POSTs
+time to settle, including POSTs from older versions that do not record pending
+ownership. Keep submissions and reconciles stopped through the upgrade or
+rollback. If scaling down, make sure the replacement Deployment also stays
+at zero replicas until the change is complete. Run the pending ownership
+check across all namespaces and proceed only when it succeeds and prints no
+clients:
 
 ```sh
 clients=$(kubectl get clients.rauthy.fluence.dev --all-namespaces -o json) &&
@@ -496,7 +526,10 @@ clients=$(kubectl get clients.rauthy.fluence.dev --all-namespaces -o json) &&
   jq -r '.items[] | select(.status.ownership.pending == true) | [.metadata.namespace, .metadata.name] | @tsv'
 ```
 
-If an orphan remains after the change, follow the
+If the check lists any clients, let their reconciles settle with submissions
+still stopped, then repeat the pause and check. After the upgrade or rollback,
+restore controller replicas or remove the pause annotations you added, then
+resume submitting clients. If an orphan remains after the change, follow the
 [cleanup steps](#clean-up-an-orphaned-client).
 
 From the release after v0.1.0, a spec with `scopes: []` or `defaultScopes: []`
