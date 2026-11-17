@@ -7,7 +7,6 @@ import (
 	"slices"
 	"sync/atomic"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
@@ -74,6 +73,16 @@ func TestDirectDeletePendingCreationExpires(t *testing.T) {
 	f := newFakeRauthy(t)
 	f.failPost = true
 	clk := clocktest.NewFakeClock(time.Now().UTC().Truncate(time.Second))
+	var delay404 atomic.Bool
+	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/auth/v1/clients/app" && delay404.Swap(false) {
+			// The lookup starts at +59s, but the 404 reaches Delete at +61s.
+			clk.Step(2 * time.Second)
+			writeError(w, http.StatusNotFound, "client not found")
+			return
+		}
+		f.serve(w, r)
+	})
 	h := newHarnessWithClock(t, f, newClient(), clk)
 	cr := h.reconcile(t, 1)
 	c := &client.Connector{Kube: h.kube, Usage: &noopTracker{}, Clock: clk}
@@ -89,7 +98,14 @@ func TestDirectDeletePendingCreationExpires(t *testing.T) {
 	if diff := cmp.Diff(proof, cr.Status.Ownership); diff != "" {
 		t.Fatalf("Delete lost fresh pending proof: %s", diff)
 	}
-	clk.Step(time.Minute + time.Second)
+	clk.Step(59 * time.Second)
+	delay404.Store(true)
+	if _, err = e.Delete(t.Context(), cr); err == nil || delay404.Load() {
+		t.Fatalf("Delete must reject the delayed 404: %v", err)
+	}
+	if diff := cmp.Diff(proof, h.reconcile(t, 0).Status.Ownership); diff != "" {
+		t.Fatalf("delayed 404 changed pending proof: %s", diff)
+	}
 	if _, err = e.Delete(t.Context(), cr); err != nil || cr.Status.Ownership != nil {
 		t.Fatalf("Delete failed to settle absent pending client: %v, %+v", err, cr.Status.Ownership)
 	}
@@ -181,8 +197,23 @@ func TestPendingRetryRequiresDurableTimestamp(t *testing.T) {
 }
 
 func TestDeletePendingCreationUsesHTTPTimeout(t *testing.T) {
+	t.Parallel()
 	f := newFakeRauthy(t)
 	f.failPost = true
+	var stall atomic.Bool
+	canceled := make(chan struct{})
+	testCtx := t.Context()
+	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/auth/v1/clients/app" && stall.Swap(false) {
+			select {
+			case <-r.Context().Done():
+				close(canceled)
+			case <-testCtx.Done():
+			}
+			return
+		}
+		f.serve(w, r)
+	})
 	clk := clocktest.NewFakeClock(time.Now().UTC().Truncate(time.Second))
 	h := newHarnessWithClock(t, f, newClient(), clk)
 	cr := h.reconcile(t, 1)
@@ -194,35 +225,24 @@ func TestDeletePendingCreationUsesHTTPTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Block the configured client's transport so synctest can measure its
-	// timeout exactly. The settlement window reserves 30s of its 60s for the queue.
-	synctest.Test(t, func(t *testing.T) {
-		transport := http.DefaultTransport
-		http.DefaultTransport = pendingLookupStall{} //nolint:reassign // This serial test controls the default transport.
-		defer func() {
-			http.DefaultTransport = transport //nolint:reassign // Restore the transport before other tests run.
-		}()
-		const requestBudget = 30 * time.Second
-		ctx, cancel := context.WithTimeout(t.Context(), requestBudget+5*time.Second)
-		defer cancel()
-		started := time.Now()
-		_, err = e.Delete(ctx, cr)
-		if elapsed := time.Since(started); !errors.Is(err, context.DeadlineExceeded) ||
-			ctx.Err() != nil || elapsed != requestBudget {
-			t.Fatalf(
-				"Delete after %s: %v (parent context: %v), want the %s HTTP timeout",
-				elapsed,
-				err,
-				ctx.Err(),
-				requestBudget,
-			)
-		}
-	})
-}
-
-type pendingLookupStall struct{}
-
-func (pendingLookupStall) RoundTrip(r *http.Request) (*http.Response, error) {
-	<-r.Context().Done()
-	return nil, r.Context().Err()
+	// The settlement window allows 30s for the request and 30s for the queue.
+	// Leave one second for scheduling and HTTP cleanup when measuring wall time.
+	const requestBudget, maxElapsed = 30 * time.Second, 31 * time.Second
+	ctx, cancel := context.WithTimeout(testCtx, requestBudget+5*time.Second)
+	defer cancel()
+	stall.Store(true)
+	started := time.Now()
+	_, err = e.Delete(ctx, cr)
+	elapsed := time.Since(started)
+	if !errors.Is(err, context.DeadlineExceeded) ||
+		ctx.Err() != nil || elapsed < requestBudget || elapsed > maxElapsed {
+		t.Fatalf("Delete after %s: %v (parent context: %v), want HTTP timeout in [%s, %s]",
+			elapsed, err, ctx.Err(), requestBudget, maxElapsed)
+	}
+	select {
+	case <-canceled:
+		t.Logf("The server observed cancellation after the client timed out in %s.", elapsed)
+	case <-time.After(time.Second):
+		t.Fatal("server did not observe cancellation of the stalled GET")
+	}
 }
