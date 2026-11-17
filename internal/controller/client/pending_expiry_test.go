@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
@@ -100,6 +101,56 @@ func TestDirectDeletePendingCreationExpires(t *testing.T) {
 	}
 }
 
+func TestReconcilerDeletePendingCreationOnLookupError(t *testing.T) {
+	for _, status := range []int{http.StatusForbidden, http.StatusInternalServerError} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			testDeletePendingCreationOnLookupError(t, status)
+		})
+	}
+}
+
+func testDeletePendingCreationOnLookupError(t *testing.T, status int) {
+	t.Helper()
+	f := newFakeRauthy(t)
+	f.commitThenFail = true
+	var failGet atomic.Bool
+	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if failGet.Load() && r.Method == http.MethodGet && r.URL.Path == "/auth/v1/clients/app" {
+			writeError(w, status, http.StatusText(status))
+			return
+		}
+		f.serve(w, r)
+	})
+	clk := clocktest.NewFakeClock(time.Now().UTC().Truncate(time.Second))
+	h := newHarnessWithClock(t, f, newClient(), clk)
+	cr := h.reconcile(t, 1)
+	proof := cr.Status.Ownership.DeepCopy()
+	if proof == nil || !proof.Pending || f.stored() == nil {
+		t.Fatal("POST did not leave both a client and pending proof")
+	}
+	h.ageCreate(t)
+	if err := h.kube.Delete(t.Context(), h.reconcile(t, 0)); err != nil {
+		t.Fatal(err)
+	}
+	clk.Step(time.Minute + time.Second)
+	f.resetCalls()
+	failGet.Store(true)
+	got := h.reconcile(t, 1)
+	if got == nil || len(got.Finalizers) == 0 {
+		t.Fatalf("Client finalized on GET %d", status)
+	}
+	if diff := cmp.Diff(proof, got.Status.Ownership); diff != "" {
+		t.Fatalf("GET %d changed pending proof: %s", status, diff)
+	}
+	if f.stored() == nil || slices.Contains(f.callLog(), "DELETE /clients/app") {
+		t.Fatalf("GET %d caused a Rauthy deletion", status)
+	}
+	failGet.Store(false)
+	if got = h.reconcile(t, 4); got != nil || f.stored() != nil {
+		t.Fatal("the next reconcile did not delete the client and finalize")
+	}
+}
+
 func TestPendingRetryRequiresDurableTimestamp(t *testing.T) {
 	f := newFakeRauthy(t)
 	f.failPost = true
@@ -130,17 +181,8 @@ func TestPendingRetryRequiresDurableTimestamp(t *testing.T) {
 }
 
 func TestDeletePendingCreationUsesHTTPTimeout(t *testing.T) {
-	t.Parallel()
 	f := newFakeRauthy(t)
 	f.failPost = true
-	var stall atomic.Bool
-	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if stall.Load() && r.Method == http.MethodGet && r.URL.Path == "/auth/v1/clients/app" {
-			<-r.Context().Done()
-			return
-		}
-		f.serve(w, r)
-	})
 	clk := clocktest.NewFakeClock(time.Now().UTC().Truncate(time.Second))
 	h := newHarnessWithClock(t, f, newClient(), clk)
 	cr := h.reconcile(t, 1)
@@ -152,21 +194,35 @@ func TestDeletePendingCreationUsesHTTPTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Use the same 30-second request budget that the 60-second settlement window allows.
-	const requestBudget = 30 * time.Second
-	ctx, cancel := context.WithTimeout(t.Context(), requestBudget+5*time.Second)
-	defer cancel()
-	stall.Store(true)
-	started := time.Now()
-	_, err = e.Delete(ctx, cr)
-	if elapsed := time.Since(started); !errors.Is(err, context.DeadlineExceeded) ||
-		ctx.Err() != nil || elapsed < requestBudget {
-		t.Fatalf(
-			"Delete after %s: %v (parent context: %v), want the %s HTTP timeout",
-			elapsed,
-			err,
-			ctx.Err(),
-			requestBudget,
-		)
-	}
+	// Block the configured client's transport so synctest can measure its
+	// timeout exactly. The settlement window reserves 30s of its 60s for the queue.
+	synctest.Test(t, func(t *testing.T) {
+		transport := http.DefaultTransport
+		http.DefaultTransport = pendingLookupStall{} //nolint:reassign // This serial test controls the default transport.
+		defer func() {
+			http.DefaultTransport = transport //nolint:reassign // Restore the transport before other tests run.
+		}()
+		const requestBudget = 30 * time.Second
+		ctx, cancel := context.WithTimeout(t.Context(), requestBudget+5*time.Second)
+		defer cancel()
+		started := time.Now()
+		_, err = e.Delete(ctx, cr)
+		if elapsed := time.Since(started); !errors.Is(err, context.DeadlineExceeded) ||
+			ctx.Err() != nil || elapsed != requestBudget {
+			t.Fatalf(
+				"Delete after %s: %v (parent context: %v), want the %s HTTP timeout",
+				elapsed,
+				err,
+				ctx.Err(),
+				requestBudget,
+			)
+		}
+	})
+}
+
+type pendingLookupStall struct{}
+
+func (pendingLookupStall) RoundTrip(r *http.Request) (*http.Response, error) {
+	<-r.Context().Done()
+	return nil, r.Context().Err()
 }

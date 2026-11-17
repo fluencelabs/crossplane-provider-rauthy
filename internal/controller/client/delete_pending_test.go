@@ -32,6 +32,7 @@ func TestReconcilerDeletePendingCreation(t *testing.T) {
 }
 
 func delayedCreation(t *testing.T, confidential bool, clk clock.PassiveClock,
+	interceptGet func(http.ResponseWriter, *http.Request) bool,
 	intercept ...interceptor.Funcs,
 ) (*harness, *fakeRauthy, func()) {
 	t.Helper()
@@ -48,6 +49,10 @@ func delayedCreation(t *testing.T, confidential bool, clk clock.PassiveClock,
 			<-release
 			f.serve(w, r)
 			close(committed)
+			return
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/auth/v1/clients/app" &&
+			interceptGet != nil && interceptGet(w, r) {
 			return
 		}
 		f.serve(w, r)
@@ -79,10 +84,10 @@ func delayedCreation(t *testing.T, confidential bool, clk clock.PassiveClock,
 		select {
 		case <-committed:
 		case <-time.After(10 * time.Second):
-			t.Fatal("POST did not commit")
+			t.Error("POST did not commit")
 		}
 		if posts.Load() != 1 {
-			t.Fatalf("POST count = %d, want 1", posts.Load())
+			t.Errorf("POST count = %d, want 1", posts.Load())
 		}
 	}
 }
@@ -90,7 +95,7 @@ func delayedCreation(t *testing.T, confidential bool, clk clock.PassiveClock,
 func testDeletePendingCreation(t *testing.T, confidential, replacement bool) {
 	t.Helper()
 	clk := clocktest.NewFakeClock(time.Now().UTC().Truncate(time.Second))
-	h, f, commit := delayedCreation(t, confidential, clk)
+	h, f, commit := delayedCreation(t, confidential, clk, nil)
 	got := h.reconcile(t, 0)
 	proof := got.Status.Ownership.DeepCopy()
 	h.ageCreate(t)
@@ -167,7 +172,7 @@ func TestDeletePendingCreationWithoutClient(t *testing.T) {
 func TestReconcilerDeletePendingCreationUsesLookupTime(t *testing.T) {
 	clk := clocktest.NewFakeClock(time.Now().UTC().Truncate(time.Second))
 	var afterLookup func()
-	h, f, commit := delayedCreation(t, true, clk, interceptor.Funcs{
+	h, f, commit := delayedCreation(t, true, clk, nil, interceptor.Funcs{
 		Get: func(ctx context.Context, c kube.WithWatch, key kube.ObjectKey, obj kube.Object, opts ...kube.GetOption) error {
 			if _, ok := obj.(*v1alpha1.Client); ok && afterLookup != nil {
 				afterLookup()
@@ -197,6 +202,44 @@ func TestReconcilerDeletePendingCreationUsesLookupTime(t *testing.T) {
 	}
 	if got == nil || len(got.Finalizers) == 0 {
 		t.Fatal("Client finalized using a 404 received before expiry")
+	}
+	if diff := cmp.Diff(proof, got.Status.Ownership); diff != "" {
+		t.Fatalf("pending proof changed: %s", diff)
+	}
+	if got = h.reconcile(t, 4); got != nil || f.stored() != nil {
+		t.Fatal("the next reconcile did not delete the late client and finalize")
+	}
+}
+
+func TestReconcilerDeletePendingCreationWithDelayed404(t *testing.T) {
+	clk := clocktest.NewFakeClock(time.Now().UTC().Truncate(time.Second))
+	var deliverStale404 atomic.Bool
+	var commit func()
+	h, f, commit := delayedCreation(t, true, clk, func(w http.ResponseWriter, _ *http.Request) bool {
+		if !deliverStale404.Swap(false) {
+			return false
+		}
+		// This GET saw no client at +58s. Commit at +59s, then deliver its 404 at +61s.
+		clk.Step(time.Second)
+		commit()
+		clk.Step(2 * time.Second)
+		writeError(w, http.StatusNotFound, "client not found")
+		return true
+	})
+	got := h.reconcile(t, 0)
+	proof := got.Status.Ownership.DeepCopy()
+	h.ageCreate(t)
+	if err := h.kube.Delete(t.Context(), h.reconcile(t, 0)); err != nil {
+		t.Fatal(err)
+	}
+	clk.Step(58 * time.Second)
+	deliverStale404.Store(true)
+	got = h.reconcile(t, 1)
+	if deliverStale404.Load() || f.stored() == nil {
+		t.Fatal("the delayed 404 did not cross the POST commit and settlement boundary")
+	}
+	if got == nil || len(got.Finalizers) == 0 {
+		t.Fatal("Client finalized on a 404 from a GET started before expiry")
 	}
 	if diff := cmp.Diff(proof, got.Status.Ownership); diff != "" {
 		t.Fatalf("pending proof changed: %s", diff)

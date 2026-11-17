@@ -276,9 +276,9 @@ func (e *external) ensureOwned(
 	if err := e.checkBackend(ctx, cr); err != nil {
 		return notOwned, nil, time.Time{}, err
 	}
-	got, notFoundAt, err := e.lookup(ctx, id)
+	got, lookupStarted, err := e.lookup(ctx, id)
 	if err != nil || got == nil {
-		return notOwned, nil, notFoundAt, err
+		return notOwned, nil, lookupStarted, err
 	}
 	o, _, err := e.verifyOwner(ctx, cr, id, got)
 	return o, got, time.Time{}, err
