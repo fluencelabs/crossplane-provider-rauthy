@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
+	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -49,11 +51,13 @@ func olderCRDs(t *testing.T) []*apiextensionsv1.CustomResourceDefinition {
 	return out
 }
 
-// TestEnvOlderCRDPrunesOwnership: with a Client CRD that has no
-// status.ownership, a real API server accepts the status patch and prunes the
-// field. The provider notices from the answer, deletes the client it just
-// created and creates no more.
-func TestEnvOlderCRDPrunesOwnership(t *testing.T) {
+// TestEnvOlderCRDRefusesCreation: with a Client CRD that has no
+// status.ownership, a real API server accepts the status patch that records
+// the pending creation proof and prunes the field. The provider notices from
+// the answer, before any POST, and refuses to create: Rauthy receives no
+// create call, the API server holds no ownership record, the Client does not
+// become Ready, and every later create is refused naming the stale CRD.
+func TestEnvOlderCRDRefusesCreation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	env := &envtest.Environment{CRDs: olderCRDs(t)}
@@ -79,9 +83,6 @@ func TestEnvOlderCRDPrunesOwnership(t *testing.T) {
 	if _, err = e.Create(ctx, cr); err == nil || !strings.Contains(err.Error(), "does not keep status.ownership") {
 		t.Fatalf("create answered %v, want the CRD named", err)
 	}
-	if s.stored() != nil {
-		t.Error("the unrecorded client was left in Rauthy")
-	}
 	if _, err = e.Create(ctx, cr); err == nil || !strings.Contains(err.Error(), "does not keep status.ownership") {
 		t.Errorf("a second create answered %v, want it refused", err)
 	}
@@ -91,8 +92,18 @@ func TestEnvOlderCRDPrunesOwnership(t *testing.T) {
 			posts++
 		}
 	}
-	if posts != 1 {
-		t.Errorf("%d creates, want 1", posts)
+	if posts != 0 {
+		t.Errorf("%d creates, want 0", posts)
+	}
+	if s.stored() != nil {
+		t.Error("a client was created in Rauthy")
+	}
+	got := storedIn(t, kc, cr)
+	if got.Status.Ownership != nil {
+		t.Errorf("the API server holds status.ownership %+v under a CRD without it", got.Status.Ownership)
+	}
+	if c := got.GetCondition(xpv2.TypeReady); c.Status == corev1.ConditionTrue {
+		t.Errorf("Ready = %+v, want the refused Client not Ready", c)
 	}
 
 	// The typed client resets its target before decoding the answer: a
