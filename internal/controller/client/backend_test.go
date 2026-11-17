@@ -197,3 +197,33 @@ func TestReconcilerIndependentBackends(t *testing.T) {
 		t.Fatal("deleting second backend affected the wrong client")
 	}
 }
+
+// A record written before records named their Rauthy is bound to the current
+// backend on the first Observe, and the client stays managed.
+func TestLegacyRecordBindsToCurrentBackend(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newFakeRauthy(t)
+	f.put(existing(false))
+	cr := newClient(owned, public)
+	k := newKube(t, f, cr)
+	stored := &v1alpha1.Client{}
+	if err := k.Get(ctx, kube.ObjectKeyFromObject(cr), stored); err != nil {
+		t.Fatal(err)
+	}
+	stored.Status.Ownership.BackendURL = ""
+	if err := k.Status().Update(ctx, stored); err != nil {
+		t.Fatal(err)
+	}
+	obs, err := client.NewExternal(f.api(t), k.Status(), k, testIssuer).Observe(ctx, stored)
+	if err != nil || !obs.ResourceExists {
+		t.Fatalf("Observe of a legacy record = %+v, %v; want the client managed", obs, err)
+	}
+	after := &v1alpha1.Client{}
+	if err = k.Get(ctx, kube.ObjectKeyFromObject(cr), after); err != nil {
+		t.Fatal(err)
+	}
+	if want := f.srv.URL + "/auth/v1"; after.Status.Ownership == nil || after.Status.Ownership.BackendURL != want {
+		t.Fatalf("stored ownership = %+v, want backendURL %q", after.Status.Ownership, want)
+	}
+}

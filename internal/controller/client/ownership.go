@@ -139,10 +139,11 @@ func (e *external) verifyOwner(
 	if err = checkRecordID(fresh, id); err != nil {
 		return notOwned, nil, err
 	}
-	rec := fresh.Status.Ownership
-	if rec != nil && rec.BackendURL != e.backendURL {
-		return notOwned, nil, errBackendChanged
+	if err = e.bindBackend(ctx, fresh); err != nil {
+		return notOwned, nil, err
 	}
+	cr.Status.Ownership = fresh.Status.Ownership
+	rec := fresh.Status.Ownership
 	if rec == nil {
 		return notOwned, nil, nil
 	}
@@ -492,9 +493,33 @@ func (e *external) checkBackend(ctx context.Context, cr *v1alpha1.Client) error 
 	if err != nil {
 		return err
 	}
+	if err = e.bindBackend(ctx, fresh); err != nil {
+		return err
+	}
 	cr.Status.Ownership = fresh.Status.Ownership
-	if rec := cr.Status.Ownership; rec != nil && rec.BackendURL != e.backendURL {
+	return checkRecordID(cr, meta.GetExternalName(cr))
+}
+
+// bindBackend refuses a record made through another Rauthy. A record written
+// before records named their Rauthy has no backend URL: it was made through
+// the only backend the resource has had, so it is bound to the current one
+// once, by the same confirmed status write as any other record.
+func (e *external) bindBackend(ctx context.Context, cr *v1alpha1.Client) error {
+	rec := cr.Status.Ownership
+	switch {
+	case rec == nil || rec.BackendURL == e.backendURL:
+		return nil
+	case rec.BackendURL != "":
 		return errBackendChanged
 	}
-	return checkRecordID(cr, meta.GetExternalName(cr))
+	want := rec.DeepCopy()
+	want.BackendURL = e.backendURL
+	stored, _, err := e.patchOwnership(ctx, cr, want)
+	if err != nil {
+		return fmt.Errorf("cannot bind the ownership record to the Rauthy backend: %w", err)
+	}
+	if !sameRecord(stored, want) {
+		return errors.New("the ownership record changed while binding it to the Rauthy backend")
+	}
+	return nil
 }

@@ -114,7 +114,9 @@ Ownership records include the Rauthy API root (`backendURL`). A changed
 `providerConfigRef` or ProviderConfig URL cannot transfer ownership to another
 Rauthy instance, even if it contains a public client with the same id. Restore
 the original URL to resume reconciliation and deletion. Independent Rauthy
-instances can each manage the same client id.
+instances can each manage the same client id. A record written by an earlier
+release has no `backendURL`; the provider binds it to the current
+ProviderConfig URL on its first reconcile, so upgrade before changing the URL.
 
 Before it acts as the owner (reports the client as existing, reads or
 publishes its secret, updates or deletes it), the provider re-reads the
