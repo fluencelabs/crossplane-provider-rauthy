@@ -158,9 +158,9 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Client) (managed.Ex
 }
 
 // observe does the work of Observe. The cached object only decides cheap
-// refusals; anything that acts as the owner (reporting the client as existing,
-// reading its secret, and the Update and Delete that follow) needs ownership
-// confirmed by an uncached read.
+// refusals; anything that acts as the owner (reporting the client as existing
+// and reading its secret) needs ownership confirmed by an uncached read.
+// Update and Delete confirm it again themselves, right before they write.
 func (e *external) observe(ctx context.Context, cr *v1alpha1.Client) (managed.ExternalObservation, error) {
 	if err := e.checkBackend(ctx, cr); err != nil {
 		return managed.ExternalObservation{}, err

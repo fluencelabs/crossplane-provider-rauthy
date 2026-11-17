@@ -71,7 +71,9 @@ import (
 // (refused until someone deletes C); after M leaves S2; between a DELETE and
 // clearing M leaves S3, which the next Observe repairs. For public clients the
 // S2 -> S2' transition cannot be detected: a recreated public client with the
-// same id looks like S2.
+// same id looks like S2. For a confidential client it is detected up to one
+// request: Update and Delete confirm the secret right before they write, and
+// Rauthy offers no conditional write to close the gap between the two.
 
 // detachedTimeout bounds the repair calls (re-reads, clears and rollbacks)
 // that run on a context detached from the reconcile, whose deadline is the
@@ -199,8 +201,8 @@ func IndexClientID(o kube.Object) []string {
 // records.
 //
 // This is the authoritative check: every Client is listed from the API
-// server, bypassing the cache. Create runs it right before the POST and
-// Delete right before the DELETE.
+// server, bypassing the cache. Create runs it right before the POST; Delete
+// runs it before confirming the client itself and then sending the DELETE.
 func (e *external) recordedElsewhere(ctx context.Context, cr *v1alpha1.Client, id string) (bool, error) {
 	ctx, cancel := detached(ctx)
 	defer cancel()
@@ -217,8 +219,8 @@ func (e *external) recordedElsewhere(ctx context.Context, cr *v1alpha1.Client, i
 // a record written within the cache's lag, and everything Observe decides as
 // the owner rests on it: publishing the connection details (a confidential
 // client's secret included), reporting the client as existing and Ready, and
-// the Update that follows. Create and Delete do not: they repeat the check
-// uncached right before the POST and the DELETE.
+// the Update that follows. Create and Delete do not: they run the uncached
+// check before the POST and the DELETE.
 func (e *external) recordedElsewhereCached(ctx context.Context, cr *v1alpha1.Client, id string) (bool, error) {
 	if e.cache == nil {
 		return e.recordedElsewhere(ctx, cr, id)
