@@ -289,6 +289,10 @@ func (f *fakeRauthy) update(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	f.lastPut = &req
 	f.lastPutRaw = raw
+	if req.Name != nil && *req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name must contain at least two characters")
+		return
+	}
 	// Like Rauthy, refuse null for the scope lists and store the default
 	// scope unless the stored CSV already contains openid.
 	if msg := requireArrays(raw, "scopes", "default_scopes"); msg != "" {

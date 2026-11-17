@@ -143,12 +143,12 @@ func (e *external) verifyOwner(
 	if rec == nil {
 		return notOwned, nil, nil
 	}
+	if rec.Pending {
+		return e.finishCreation(ctx, cr, got)
+	}
 	taken, err := e.recordedElsewhereCached(ctx, fresh, id)
 	if err != nil || taken {
 		return notOwned, nil, err
-	}
-	if rec.Pending {
-		return e.finishCreation(ctx, cr, got)
 	}
 	if !got.Confidential {
 		// A public client has no secret: the binding is the backend URL and id. A
@@ -197,7 +197,7 @@ func IndexClientID(o kube.Object) []string {
 // are namespaced, and a public client's record is bound by the URL and id: a
 // record held by two objects cannot tell which of them created the client, so
 // neither may act as its owner, and no Client may create an id another one
-// records.
+// records. Pending proofs do not claim the id or block its actual creator.
 //
 // This is the authoritative check: every Client is listed from the API
 // server, bypassing the cache. Create runs it right before the POST; Delete
@@ -247,12 +247,14 @@ func (e *external) refusedFor(cr, other *v1alpha1.Client, id string) bool {
 	return true
 }
 
-// otherRecord returns a Client among items, other than cr, that records id.
+// otherRecord returns another finalized record for id. Pending records prove
+// only an attempted create; the random Rauthy name decides which attempt won.
 func otherRecord(items []v1alpha1.Client, cr *v1alpha1.Client, id, backend string) *v1alpha1.Client {
 	for i := range items {
 		// A record without a backend URL predates the binding: it was made
 		// through the only backend its resource had, which may be this one.
 		if other := &items[i]; other.GetUID() != cr.GetUID() && ownedClientID(other) == id &&
+			!other.Status.Ownership.Pending &&
 			(other.Status.Ownership.Backend == backend || other.Status.Ownership.Backend == "") {
 			return other
 		}
@@ -402,7 +404,10 @@ func (e *external) finishCreation(
 	rec := cr.Status.Ownership
 	if rec.CreationNameHash == "" || creationNameHash(got.Name) != rec.CreationNameHash ||
 		got.Confidential != cr.Spec.ForProvider.Confidential {
-		return otherClient, nil, nil
+		return notOwned, nil, e.clearOwnership(ctx, cr)
+	}
+	if taken, err := e.recordedElsewhereCached(ctx, cr, rec.ClientID); err != nil || taken {
+		return notOwned, nil, err
 	}
 	var secret *rauthy.Secret
 	want := rec.DeepCopy()
@@ -423,7 +428,7 @@ func (e *external) finishCreation(
 			return notOwned, nil, err
 		}
 		if current == nil || creationNameHash(current.Name) != rec.CreationNameHash || !current.Confidential {
-			return otherClient, nil, nil
+			return notOwned, nil, e.clearOwnership(ctx, cr)
 		}
 	}
 	want.Pending = false

@@ -395,7 +395,7 @@ func (e *external) Update(ctx context.Context, cr *v1alpha1.Client) (managed.Ext
 
 	req := updateRequest(id, &cr.Spec.ForProvider, got)
 	if needsCreationNameCleanup(cr, got) {
-		req.Name = cr.Spec.ForProvider.Name
+		req.Name = orString(cr.Spec.ForProvider.Name, nil)
 	}
 	updated, err := e.api.UpdateClient(ctx, id, req)
 	if err != nil {

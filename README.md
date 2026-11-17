@@ -82,9 +82,9 @@ record was made for.
 - **A public client has no secret.** Its binding is the backend URL and id, so a public
   client deleted and recreated outside Kubernetes with the same id is still
   taken for the resource's own.
-- **A record must be the only one for its id in the same Rauthy instance.** Client ids are global within an instance,
+- **A finalized record must be the only one for its id in the same Rauthy instance.** Client ids are global within an instance,
   while `Client` objects are namespaced. If another `Client` (another UID)
-  records the same id, this one is refused. This holds for confidential clients too: two
+  holds a finalized record for the same id, this one is refused. This holds for confidential clients too: two
   records of one id can only come from a record that outlived its client or
   from a forged one, and the provider cannot tell which of the two is right.
   A record left behind by a client deleted out of band therefore blocks other
@@ -153,6 +153,9 @@ this resource's client with that id exists in Rauthy.**
   A different name is refused without publishing, updating or deleting the
   client. The first owned Update restores the requested name, including an
   unset name. A CRD that prunes the pending proof prevents POST entirely.
+  Pending proofs do not reserve the id. Concurrent attempts are distinguished
+  by the random name in Rauthy. A losing attempt clears its stale proof on
+  the next reconcile, and cannot block the successful creator.
 - **Delete** (S2): the DELETE, then the record is cleared at once.
 - **A client that disappears** (S2 to S3, by Delete or out of band): the next
   observation clears the record and only then lets the resource create again
