@@ -15,7 +15,11 @@ import (
 	"github.com/fluencelabs/rauthy-go"
 )
 
-const fakeSecret = "s3cr3t-value"
+const (
+	fakeSecret       = "s3cr3t-value"
+	hiqliteNotFound  = "no rows returned"
+	postgresNotFound = "No results found"
+)
 
 // fakeRauthy is an in-memory stand-in for the Rauthy client endpoints. Like
 // the real server, POST /clients keeps only the fields of NewClientRequest and
@@ -27,6 +31,8 @@ type fakeRauthy struct {
 	// through POST get a fresh one; clients stored with put get fakeSecret.
 	secrets map[string]string
 	created int
+	// notFoundMessage varies with the Rauthy storage backend.
+	notFoundMessage string
 	// failSecret makes every secret read answer 500.
 	failSecret bool
 	calls      []string
@@ -55,7 +61,10 @@ type fakeRauthy struct {
 
 func newFakeRauthy(t *testing.T) *fakeRauthy {
 	t.Helper()
-	f := &fakeRauthy{clients: map[string]*rauthy.ClientResponse{}, secrets: map[string]string{}}
+	f := &fakeRauthy{
+		clients: map[string]*rauthy.ClientResponse{}, secrets: map[string]string{},
+		notFoundMessage: hiqliteNotFound,
+	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
 	return f
@@ -280,7 +289,7 @@ func (f *fakeRauthy) create(w http.ResponseWriter, r *http.Request) {
 func (f *fakeRauthy) byID(w http.ResponseWriter, r *http.Request, id string) {
 	c, exists := f.clients[id]
 	if !exists {
-		writeClientNotFound(w)
+		writeClientNotFound(w, f.notFoundMessage)
 		return
 	}
 	switch r.Method {
@@ -393,7 +402,7 @@ func requireArrays(raw []byte, fields ...string) string {
 func (f *fakeRauthy) secret(w http.ResponseWriter, id string) {
 	c, exists := f.clients[id]
 	if !exists {
-		writeClientNotFound(w)
+		writeClientNotFound(w, f.notFoundMessage)
 		return
 	}
 	if f.failSecret {
@@ -419,9 +428,9 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": http.StatusText(status), "message": msg})
 }
 
-// Both Rauthy 0.36.2 and 0.37.2 return this envelope for a missing client.
-func writeClientNotFound(w http.ResponseWriter) {
+// Both Rauthy 0.36.2 and 0.37.2 return this envelope with a backend-specific message.
+func writeClientNotFound(w http.ResponseWriter, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusNotFound)
-	_, _ = io.WriteString(w, `{"timestamp":1794955166,"error":"NotFound","message":"no rows returned"}`)
+	_, _ = fmt.Fprintf(w, `{"timestamp":1794955166,"error":"NotFound","message":%q}`, message)
 }

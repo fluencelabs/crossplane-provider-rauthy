@@ -50,13 +50,15 @@ v2: managed resources are namespaced, so a composite resource can compose a
 
 ### Clean up an orphaned client
 
-For a terminating `Client`, stop the provider controller before starting.
-Keep the controller stopped until you have verified the Rauthy response and
-finished cleanup.
+Use this procedure for a terminating or already deleted `Client`. Pause
+reconciliation for a terminating `Client` and confirm the pause as
+described in [Upgrading](#upgrading). Keep it paused until cleanup finishes.
+Coordinate with other operators and automation to prevent claims on the same
+Rauthy client ID during cleanup.
 
-Capture the `Client` once. Use this snapshot for the ownership checks and
-the finalizer patch. If the object is already gone, use a saved ownership
-snapshot and skip the patch:
+Capture the `Client` after the pause. Use this snapshot for the ownership
+checks and the finalizer patch. If the object is already gone, use a saved
+ownership snapshot and skip the patch:
 
 ```sh
 client=$(kubectl -n "${NAMESPACE}" get clients.rauthy.fluence.dev "${CLIENT_NAME}" -o json)
@@ -99,28 +101,50 @@ printf 'rauthy-creation-name-v1\0%s' "${RAUTHY_CLIENT_NAME}" | sha256sum
 ```
 
 Wait more than 60 seconds after the last possible create request before
-confirming absence. If its timing is unclear, wait after the controller stops.
-If the orphan still exists and you confirmed its ownership, set `CLIENT_ID`
-to its id and load a key with `Clients: delete` into `RAUTHY_API_KEY` with
-shell tracing disabled. Delete it on the verified API root:
+confirming absence. If its timing is unclear, wait after confirming the pause
+or that the object is gone.
+
+Run `set +x` before loading either API key, including when skipping DELETE.
+Keep shell tracing disabled until the keys are unset. If the orphan still
+exists and you confirmed its ownership, set `CLIENT_ID` to its ID and load a
+key with `Clients: delete` into `RAUTHY_API_KEY`.
+
+Immediately before DELETE, fetch the `Client` again. Require either a
+successful lookup confirming it is gone (`kubectl get --ignore-not-found`
+with no output), or the same UID and resourceVersion with a deletion
+timestamp. List `Client` resources across all namespaces and check both
+`status.ownership.clientID` and `crossplane.io/external-name` for claims on
+this ID on the verified backend. Stop if a live resource owns the client,
+the snapshot changed, or the lookups leave its ownership uncertain.
 
 ```sh
 client_url="$api_url/clients/${CLIENT_ID}"
 printf 'Authorization: API-Key %s\n' "$RAUTHY_API_KEY" |
-  curl --path-as-is --fail-with-body --request DELETE --header @- "$client_url"
+  curl -q --path-as-is --silent --show-error --fail --output /dev/null \
+    --request DELETE --header @- "$client_url"
 ```
 
 With `CLIENT_ID` set to the confirmed id, load a key with `Clients: read` into
 `RAUTHY_API_KEY` and GET the same URL, even if the client was already absent:
 
 ```sh
-printf 'Authorization: API-Key %s\n' "$RAUTHY_API_KEY" |
-  curl --path-as-is --silent --show-error --include --header @- "$api_url/clients/${CLIENT_ID}"
+(
+  response=$(printf 'Authorization: API-Key %s\n' "$RAUTHY_API_KEY" |
+    curl -q --path-as-is --silent --show-error --write-out '%{http_code}' \
+      --header @- "$api_url/clients/${CLIENT_ID}") || exit 1
+  body=${response%???}
+  status=${response#"$body"}
+  printf 'HTTP %s\n' "$status"
+  [ "$status" = 404 ] &&
+    printf '%s\n' "$body" |
+    jq -es 'length == 1 and (.[0] | .error == "NotFound" and
+      (.message == "no rows returned" or .message == "No results found"))' 2>/dev/null
+)
 ```
 
-Require HTTP 404 with a Rauthy JSON error body containing
-`"error": "NotFound"` and a database no-row message. A route or proxy 404,
-including an empty or HTML body, does not confirm absence. If the snapshot
+Require HTTP 404 and a successful check (`true`). The check prints only the
+status and the result of testing the Rauthy JSON error fields. Unset
+`RAUTHY_API_KEY` after the check. If the snapshot
 has a `metadata.deletionTimestamp`, remove the finalizers only after this
 manual check. Use the same snapshot as a precondition:
 
@@ -135,7 +159,8 @@ patch=$(printf '%s\n' "$client" | jq -ce '[
 ```
 
 If a precondition fails, fetch the object again and repeat the ownership and
-absence checks before retrying. Resume the controller after cleanup succeeds.
+absence checks before retrying. After cleanup succeeds, remove any pause
+annotation you added from a surviving object.
 
 ## Resources
 
@@ -546,21 +571,22 @@ matches the spec.
 
 An upgrade or rollback during creation can leave an orphan. Before either
 operation, stop submitting new `Client` resources in all namespaces and let
-pending creations settle. Then scale the provider controller Deployment to zero
-and verify its pods have stopped. Alternatively, keep submissions stopped and
-set `crossplane.io/paused: "true"` on every `Client` across all namespaces.
+pending creations settle. Record any existing pause annotations, then set
+`crossplane.io/paused: "true"` on every `Client` across all namespaces:
+
+```sh
+kubectl annotate clients.rauthy.fluence.dev --all --all-namespaces --overwrite crossplane.io/paused=true
+```
+
 Wait for each to report `Synced=False` with reason `ReconcilePaused` before
-proceeding. Use the scale-to-zero procedure if the running version cannot
-confirm the pause.
+proceeding.
 
 Once reconciliation is stopped, wait more than 60 seconds (the 30-second
 request timeout plus 30 seconds for the queue). This gives in-flight POSTs
 time to settle, including POSTs from older versions that do not record pending
 ownership. Keep submissions and reconciles stopped through the upgrade or
-rollback. If scaling down, make sure the replacement Deployment also stays
-at zero replicas until the change is complete. Run the pending ownership
-check across all namespaces and proceed only when it succeeds and prints no
-clients:
+rollback. Run the pending ownership check across all namespaces and proceed
+only when it succeeds and prints no clients:
 
 ```sh
 clients=$(kubectl get clients.rauthy.fluence.dev --all-namespaces -o json) &&
@@ -570,8 +596,10 @@ clients=$(kubectl get clients.rauthy.fluence.dev --all-namespaces -o json) &&
 
 If the check lists any clients, let their reconciles settle with submissions
 still stopped, then repeat the pause and check. After the upgrade or rollback,
-restore controller replicas or remove the pause annotations you added, then
-resume submitting clients. If an orphan remains after the change, follow the
+remove the pause annotations you added with
+`kubectl -n "${NAMESPACE}" annotate clients.rauthy.fluence.dev "${CLIENT_NAME}" crossplane.io/paused-`,
+restore any prior values you changed, then resume submitting clients. If an
+orphan remains after the change, follow the
 [cleanup steps](#clean-up-an-orphaned-client).
 
 From the release after v0.1.0, a spec with `scopes: []` or `defaultScopes: []`

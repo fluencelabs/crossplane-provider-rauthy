@@ -3,6 +3,7 @@ package client_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -258,6 +259,32 @@ func TestReconcilerCreateUpdateReady(t *testing.T) {
 	if s == nil || string(s.Data[client.ConnectionKeyClientSecret]) != f.secretOf() ||
 		string(s.Data[client.ConnectionKeyClientID]) != testID {
 		t.Errorf("connection Secret = %+v, want the client id and secret", s)
+	}
+}
+
+func TestReconcilerCreatesAfterBackendNotFound(t *testing.T) {
+	t.Parallel()
+	for _, backend := range []struct {
+		name, message string
+	}{
+		{"hiqlite", hiqliteNotFound},
+		{"postgres", postgresNotFound},
+	} {
+		t.Run(backend.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeRauthy(t)
+			f.notFoundMessage = backend.message
+			h := newHarness(t, f, newClient())
+
+			got := h.reconcile(t, 5)
+
+			if calls := f.callLog(); !slices.Contains(calls, "POST /clients") {
+				t.Fatalf("no POST followed the backend NotFound: %v", calls)
+			}
+			if proof := got.Status.Ownership; proof == nil || proof.Pending || proof.ClientID != testID {
+				t.Fatalf("status.ownership = %+v, want completed ownership of %q", proof, testID)
+			}
+		})
 	}
 }
 

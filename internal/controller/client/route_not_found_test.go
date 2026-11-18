@@ -11,31 +11,44 @@ import (
 )
 
 func TestReconcilerRouteNotFoundRetainsClient(t *testing.T) {
+	const clientRoute = "/auth/v1/clients/app"
 	for _, method := range []string{http.MethodGet, http.MethodDelete} {
 		t.Run(method+"/empty", func(t *testing.T) {
-			testRouteNotFoundRetainsClient(t, method, func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(http.StatusNotFound)
-			})
+			empty := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) }
+			testRouteNotFoundRetainsClient(t, method, clientRoute, empty)
 		})
 		t.Run(method+"/text", func(t *testing.T) {
-			testRouteNotFoundRetainsClient(t, method, http.NotFound)
+			testRouteNotFoundRetainsClient(t, method, clientRoute, http.NotFound)
 		})
 	}
+	t.Run("DELETE/gateway-JSON", func(t *testing.T) {
+		gateway := func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"NotFound","message":"route not found"}`))
+		}
+		testRouteNotFoundRetainsClient(t, http.MethodDelete, clientRoute, gateway)
+	})
+	t.Run("POST/secret", func(t *testing.T) {
+		testRouteNotFoundRetainsClient(t, http.MethodPost, clientRoute+"/secret", http.NotFound)
+	})
 }
 
-func testRouteNotFoundRetainsClient(t *testing.T, method string, routeResponse http.HandlerFunc) {
+func testRouteNotFoundRetainsClient(t *testing.T, method, path string, routeResponse http.HandlerFunc) {
 	t.Helper()
 	f := newFakeRauthy(t)
 	f.put(existing(true))
 	var routeUnavailable atomic.Bool
 	routeUnavailable.Store(true)
 	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == method && r.URL.Path == "/auth/v1/clients/app" {
+		if r.Method == method && r.URL.Path == path {
 			if routeUnavailable.Load() {
 				routeResponse(w, r)
 				return
 			}
-			f.deleteStored()
+			if method != http.MethodPost {
+				f.deleteStored()
+			}
 		}
 		f.serve(w, r)
 	})
@@ -63,5 +76,8 @@ func testRouteNotFoundRetainsClient(t *testing.T, method string, routeResponse h
 	}
 	if h.reconcile(t, 1) != nil {
 		t.Fatal("Rauthy NotFound did not allow finalization")
+	}
+	if f.stored() != nil {
+		t.Fatal("the Rauthy client remained after the route recovered")
 	}
 }
