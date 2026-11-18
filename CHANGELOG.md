@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.1](https://github.com/fluencelabs/crossplane-provider-rauthy/compare/v0.2.0...v0.2.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* **client:** bound pending creation cleanup during deletion ([fdff472](https://github.com/fluencelabs/crossplane-provider-rauthy/commit/fdff472e64a96f633282242d9767eec8cbfe4b98))
+* **client:** do not finalize a delete while a creation may still land ([a0ddad1](https://github.com/fluencelabs/crossplane-provider-rauthy/commit/a0ddad181f6fab7c3373e43d3a347ffd94541cb8))
+* **client:** finish a pending delete only on a 404 seen after the wait ([b1f4d2c](https://github.com/fluencelabs/crossplane-provider-rauthy/commit/b1f4d2c7f549e884300897290b2964400cc2b4da))
+* **client:** settle a pending delete by when the GET started ([c29d6d6](https://github.com/fluencelabs/crossplane-provider-rauthy/commit/c29d6d64d87745f236a7f7bd62a6e658f0dcbf48))
+* distinguish route 404s from missing Rauthy clients ([00eca30](https://github.com/fluencelabs/crossplane-provider-rauthy/commit/00eca304efcad937c4ca36c56ab955beffca58fd))
+* guard manual client cleanup and verify HTTP timeout ([e3e98ed](https://github.com/fluencelabs/crossplane-provider-rauthy/commit/e3e98ed8794b2a51840ffec49717ae7339e5f20c))
+* require a post-expiry 404 for pending client deletion ([30c6674](https://github.com/fluencelabs/crossplane-provider-rauthy/commit/30c6674744f9cd731955985f039fb135490dac18))
+* retain pending creation proof during deletion ([4ecbac1](https://github.com/fluencelabs/crossplane-provider-rauthy/commit/4ecbac131a4505a058086be460c0b1620c4e850d))
+* settle pending deletion using GET start time ([7ed270a](https://github.com/fluencelabs/crossplane-provider-rauthy/commit/7ed270a416a464fd0cdff46fb0b35129871ff644))
+
 ## [0.2.0](https://github.com/fluencelabs/crossplane-provider-rauthy/compare/v0.1.1...v0.2.0) (2026-11-17)
 
 
