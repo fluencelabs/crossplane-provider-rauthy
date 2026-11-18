@@ -78,7 +78,7 @@ func TestDirectDeletePendingCreationExpires(t *testing.T) {
 		if r.Method == http.MethodGet && r.URL.Path == "/auth/v1/clients/app" && delay404.Swap(false) {
 			// The lookup starts at +59s, but the 404 reaches Delete at +61s.
 			clk.Step(2 * time.Second)
-			writeClientNotFound(w)
+			writeClientNotFound(w, hiqliteNotFound)
 			return
 		}
 		f.serve(w, r)
@@ -202,9 +202,11 @@ func TestDeletePendingCreationUsesHTTPTimeout(t *testing.T) {
 	f.failPost = true
 	var stall atomic.Bool
 	canceled := make(chan struct{})
+	lookupArrival := make(chan time.Time, 1)
 	testCtx := t.Context()
 	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/auth/v1/clients/app" && stall.Swap(false) {
+			lookupArrival <- time.Now()
 			select {
 			case <-r.Context().Done():
 				close(canceled)
@@ -239,6 +241,17 @@ func TestDeletePendingCreationUsesHTTPTimeout(t *testing.T) {
 		ctx.Err() != nil || elapsed < requestBudget || elapsed > maxElapsed {
 		t.Fatalf("Delete after %s: %v (parent context: %v), want HTTP timeout in [%s, %s]",
 			elapsed, err, ctx.Err(), requestBudget, maxElapsed)
+	}
+	// Check the time before the HTTP timeout starts separately. The fake
+	// Kubernetes client and loopback connection have no intentional wait.
+	const maxLookupStart = 1500 * time.Millisecond
+	select {
+	case arrived := <-lookupArrival:
+		if wait := arrived.Sub(started); wait > maxLookupStart {
+			t.Fatalf("Delete reached its ownership lookup after %s, want at most %s", wait, maxLookupStart)
+		}
+	default:
+		t.Fatal("Delete did not reach its ownership lookup")
 	}
 	select {
 	case <-canceled:
